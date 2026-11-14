@@ -1,0 +1,1638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HydroBlast 2D — Master Detail Edition</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  body {
+    background: #090d13;
+    color: #f1f5f9;
+    font-family: system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Top HUD */
+  #hud-top {
+    position: fixed;
+    top: 12px;
+    left: 16px;
+    right: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 20;
+    pointer-events: none;
+    transition: opacity 0.4s;
+  }
+  #hud-top.hidden { opacity: 0; pointer-events: none; }
+
+  .panel {
+    background: rgba(15, 23, 42, 0.9);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(56, 189, 248, 0.35);
+    border-radius: 12px;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    pointer-events: auto;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+  }
+
+  .job-title { font-weight: 800; font-size: 16px; color: #38bdf8; letter-spacing: 0.015em; }
+  .stage-badge {
+    font-size: 11px;
+    background: rgba(56, 189, 248, 0.2);
+    border: 1px solid rgba(56, 189, 248, 0.5);
+    color: #bae6fd;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .progress-wrap { width: 190px; height: 14px; background: #0f172a; border-radius: 7px; overflow: hidden; border: 1px solid #334155; }
+  .progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #0284c7, #38bdf8, #34d399); transition: width 0.1s linear; }
+  .pct-text { font-weight: 800; font-size: 15px; min-width: 58px; text-align: right; font-variant-numeric: tabular-nums; color: #f8fafc; }
+  .cash { color: #34d399; font-weight: 900; font-size: 18px; font-variant-numeric: tabular-nums; text-shadow: 0 0 10px rgba(52, 211, 153, 0.3); }
+
+  button {
+    background: #1e293b;
+    color: #f8fafc;
+    border: 1px solid #334155;
+    padding: 7px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  button:hover { background: #334155; border-color: #38bdf8; transform: translateY(-1px); }
+  button:active { transform: translateY(0); }
+  button.primary { background: #0369a1; border-color: #0284c7; box-shadow: 0 0 15px rgba(2, 132, 199, 0.4); }
+  button.primary:hover { background: #0284c7; border-color: #38bdf8; }
+  button.active { background: #0c4a6e; border-color: #38bdf8; box-shadow: 0 0 12px rgba(56, 189, 248, 0.5); }
+
+  /* Stage Sub-HUD */
+  #stage-hud {
+    position: fixed;
+    top: 74px;
+    left: 16px;
+    z-index: 20;
+    background: rgba(15, 23, 42, 0.88);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    border-radius: 12px;
+    padding: 12px 16px;
+    width: 280px;
+    transition: opacity 0.4s;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+  }
+  #stage-hud.hidden { opacity: 0; pointer-events: none; }
+  #stage-hud h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 8px; font-weight: 800; }
+  .stage-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12.5px;
+    padding: 5px 0;
+    border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+  }
+  .stage-item:last-child { border-bottom: none; }
+  .stage-item.done { color: #34d399; text-decoration: line-through; opacity: 0.8; }
+  .stage-item.active { color: #38bdf8; font-weight: 700; text-shadow: 0 0 8px rgba(56, 189, 248, 0.4); }
+
+  /* Live Weather & Simulation HUD */
+  #weather-hud {
+    position: fixed;
+    top: 74px;
+    right: 16px;
+    z-index: 20;
+    background: rgba(15, 23, 42, 0.88);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 12px;
+    padding: 12px 18px;
+    width: 240px;
+    transition: opacity 0.4s;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+  }
+  #weather-hud.hidden { opacity: 0; pointer-events: none; }
+  .weather-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: #cbd5e1; }
+  .weather-row { display: flex; justify-content: space-between; font-size: 12.5px; padding: 4px 0; font-family: monospace; }
+  .weather-val { color: #38bdf8; font-weight: 700; }
+
+  /* Canvas Container */
+  #game-container {
+    flex: 1;
+    position: relative;
+    cursor: none;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Bottom Nozzle Dock */
+  #hud-bottom {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 20;
+    transition: opacity 0.4s;
+  }
+  #hud-bottom.hidden { opacity: 0; pointer-events: none; }
+
+  .nozzle-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 10px 16px;
+    min-width: 96px;
+    gap: 6px;
+    background: rgba(30, 41, 59, 0.9);
+    border: 1px solid #475569;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .nozzle-btn:hover { background: #334155; border-color: #38bdf8; }
+  .nozzle-btn.active { background: #0369a1; border-color: #38bdf8; box-shadow: 0 0 15px rgba(56, 189, 248, 0.4); }
+  .nozzle-dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.8); box-shadow: 0 0 8px rgba(0,0,0,0.5); }
+  .nozzle-name { font-size: 12px; font-weight: 700; color: #f8fafc; }
+  .nozzle-key { font-size: 11px; color: #94a3b8; font-weight: 600; }
+
+  /* Cutscene Overlay */
+  #cutscene-ui {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 25;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 32px;
+  }
+  #cutscene-ui.hidden { display: none; }
+  .cutscene-banner {
+    align-self: center;
+    background: rgba(15, 23, 42, 0.92);
+    border: 1px solid rgba(56, 189, 248, 0.5);
+    padding: 14px 28px;
+    border-radius: 999px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    color: #38bdf8;
+    font-size: 15px;
+    text-transform: uppercase;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+    text-align: center;
+  }
+  #skip-btn {
+    align-self: flex-end;
+    pointer-events: auto;
+    padding: 10px 20px;
+    background: rgba(15, 23, 42, 0.95);
+    border: 1px solid #334155;
+    font-size: 14px;
+  }
+
+  /* Modals */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.88);
+    backdrop-filter: blur(10px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 16px;
+    width: 92%;
+    max-width: 680px;
+    padding: 32px;
+    box-shadow: 0 25px 60px rgba(0,0,0,0.8);
+    max-height: 88vh;
+    overflow-y: auto;
+  }
+  .modal h2 { color: #38bdf8; margin-bottom: 8px; font-size: 24px; font-weight: 800; }
+  .modal p.sub { color: #94a3b8; font-size: 14px; margin-bottom: 24px; line-height: 1.5; }
+  .grid-list { display: grid; gap: 14px; margin-bottom: 24px; }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 16px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+  }
+  .card-info h3 { font-size: 16px; margin-bottom: 4px; color: #f1f5f9; font-weight: 700; }
+  .card-info p { font-size: 13px; color: #94a3b8; line-height: 1.4; }
+  .stage-pills { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .pill { font-size: 11px; background: #0f172a; border: 1px solid #334155; padding: 4px 10px; border-radius: 6px; color: #cbd5e1; font-weight: 600; }
+  .modal-footer { display: flex; justify-content: flex-end; gap: 12px; }
+
+  /* Toast notification */
+  #toast {
+    position: fixed;
+    top: 86px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #065f46;
+    border: 1px solid #34d399;
+    color: #ecfdf5;
+    padding: 12px 24px;
+    border-radius: 10px;
+    font-weight: 800;
+    font-size: 15px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    z-index: 40;
+    box-shadow: 0 10px 30px rgba(6, 95, 70, 0.5);
+    text-align: center;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- Cutscene Overlay -->
+<div id="cutscene-ui">
+  <div class="cutscene-banner" id="cutscene-text">Arriving at Job Site — Commercial Rig Deploying...</div>
+  <button id="skip-btn" onclick="skipCutscene()">Skip Arrival ⏭</button>
+</div>
+
+<!-- Top HUD -->
+<div id="hud-top" class="hidden">
+  <div class="panel">
+    <div>
+      <div class="job-title" id="ui-job-name">3-Story Commercial Complex</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <span class="stage-badge" id="ui-stage-badge">Stage 1: Walkway</span>
+      </div>
+    </div>
+    <div class="progress-wrap"><div class="progress-bar" id="ui-progress"></div></div>
+    <div class="pct-text" id="ui-pct">0.0%</div>
+  </div>
+  <div class="panel">
+    <div class="cash" id="ui-cash">$350</div>
+    <button onclick="triggerDirtScan()" title="Shortcut: Tab or H">🔍 Scan (Tab)</button>
+    <button onclick="openModal('jobs-modal')">📋 Contracts</button>
+    <button onclick="openModal('shop-modal')">🔧 Rig Shop</button>
+    <button id="audio-btn" onclick="toggleAudio()">🔊 Audio</button>
+  </div>
+</div>
+
+<!-- Stage Sub-HUD -->
+<div id="stage-hud" class="hidden">
+  <h4>Project Stages</h4>
+  <div id="stage-list"></div>
+</div>
+
+<!-- Live Weather & Particle Simulation HUD -->
+<div id="weather-hud" class="hidden">
+  <div class="weather-header">
+    <span>Atmospheric Grid</span>
+    <span id="weather-state-name" style="color:#38bdf8;">Loading...</span>
+  </div>
+  <div class="weather-row"><span>Humidity:</span><span class="weather-val" id="wh-humidity">25%</span></div>
+  <div class="weather-row"><span>Rain Rate:</span><span class="weather-val" id="wh-rain">0.0 in/hr</span></div>
+  <div class="weather-row"><span>Air Temp:</span><span class="weather-val" id="wh-temp">30°C</span></div>
+  <div class="weather-row"><span>Sim Particles:</span><span class="weather-val" id="wh-particles">0</span></div>
+</div>
+
+<div id="toast">Stage Complete!</div>
+
+<!-- Main Playfield -->
+<div id="game-container">
+  <canvas id="canvas"></canvas>
+</div>
+
+<!-- Bottom Nozzle Dock -->
+<div id="hud-bottom" class="hidden">
+  <div class="panel" id="nozzle-dock" style="gap:10px;"></div>
+</div>
+
+<!-- Project Board Modal -->
+<div class="modal-backdrop" id="jobs-modal">
+  <div class="modal">
+    <h2>📋 Commercial Dispatch & Project Stages</h2>
+    <p class="sub">Select a contract or jump to a specific project stage. High-reach lances and downstream chemical injectors unlock faster clearing of upper stories.</p>
+    <div class="grid-list" id="jobs-list"></div>
+    <div class="modal-footer">
+      <button onclick="closeModals()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Upgrades Shop Modal -->
+<div class="modal-backdrop" id="shop-modal">
+  <div class="modal">
+    <h2>🔧 Trailer Rig & Wand Upgrades</h2>
+    <p class="sub">Upgrade your truck-mounted skid unit, telescopic high-reach lances, and rotary surface cleaners.</p>
+    <div class="grid-list" id="shop-list"></div>
+    <div class="modal-footer">
+      <button onclick="closeModals()">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ================= AUDIO ENGINE =================
+class SoundEngine {
+  constructor() {
+    this.ctx = null;
+    this.gainNode = null;
+    this.filterNode = null;
+    this.enabled = true;
+    this.isSpraying = false;
+  }
+  init() {
+    if (this.ctx) return;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    this.ctx = new AudioCtx();
+    const bufferSize = this.ctx.sampleRate * 2;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+    noise.loop = true;
+
+    this.filterNode = this.ctx.createBiquadFilter();
+    this.filterNode.type = 'bandpass';
+    this.filterNode.frequency.value = 1200;
+    this.filterNode.Q.value = 0.8;
+
+    this.gainNode = this.ctx.createGain();
+    this.gainNode.gain.value = 0;
+
+    noise.connect(this.filterNode);
+    this.filterNode.connect(this.gainNode);
+    this.gainNode.connect(this.ctx.destination);
+    noise.start();
+  }
+  setSpray(active, nozzle) {
+    if (!this.enabled) return;
+    if (!this.ctx) this.init();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const now = this.ctx.currentTime;
+    if (active && !this.isSpraying) {
+      this.gainNode.gain.setTargetAtTime(0.24, now, 0.03);
+      this.isSpraying = true;
+    } else if (!active && this.isSpraying) {
+      this.gainNode.gain.setTargetAtTime(0, now, 0.04);
+      this.isSpraying = false;
+    }
+    if (active && nozzle) {
+      this.filterNode.frequency.setTargetAtTime(nozzle.freq, now, 0.05);
+      this.filterNode.Q.setTargetAtTime(nozzle.q, now, 0.05);
+    }
+  }
+  playTruckHorn() {
+    if (!this.enabled) return;
+    if (!this.ctx) this.init();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const now = this.ctx.currentTime;
+    [185, 233].forEach(freq => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(freq, now);
+      gain.gain.setValueAtTime(0.08, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.36);
+    });
+  }
+  playChime() {
+    if (!this.enabled) return;
+    if (!this.ctx) this.init();
+    const now = this.ctx.currentTime;
+    [523.25, 659.25, 783.99, 1046.5].forEach((freq, idx) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.08);
+      gain.gain.setValueAtTime(0.14, now + idx * 0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.08 + 0.45);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now + idx * 0.08);
+      osc.stop(now + idx * 0.08 + 0.46);
+    });
+  }
+}
+const sound = new SoundEngine();
+
+function toggleAudio() {
+  sound.enabled = !sound.enabled;
+  if (!sound.enabled && sound.gainNode) sound.gainNode.gain.value = 0;
+  document.getElementById('audio-btn').textContent = sound.enabled ? '🔊 Audio' : '🔇 Muted';
+}
+
+// ================= GAME DATA & CONFIG =================
+const NOZZLES = [
+  { id: '0deg',  name: '0° Red Jet',     color: '#ef4444', radius: 14, power: 1.0,  freq: 2200, q: 1.4, desc: 'Pinpoint blast for stubborn hardened grime & high reach' },
+  { id: '15deg', name: '15° Yellow',     color: '#eab308', radius: 26, power: 0.74, freq: 1650, q: 1.0, desc: 'Heavy surface stripping for brick, stone & concrete' },
+  { id: '25deg', name: '25° Green',      color: '#22c55e', radius: 42, power: 0.50, freq: 1200, q: 0.8, desc: 'All-purpose siding, deck & walkway wash' },
+  { id: '40deg', name: '40° White',      color: '#f8fafc', radius: 62, power: 0.30, freq: 850,  q: 0.6, desc: 'Wide gentle rinse for storefront glass & vehicle trim' },
+  { id: 'soap',  name: 'Soft-Wash Foam', color: '#38bdf8', radius: 76, power: 0.05, freq: 620,  q: 0.5, desc: 'Applies surfactant chemical foam to dissolve 3-story algae', isSoap: true }
+];
+
+const WEATHER_STATES = [
+  { name: 'Clear & Dry', humidity: 0.25, rainRate: 0.0, temp: 30, windX: 0.08 },
+  { name: 'Humid Overcast', humidity: 0.82, rainRate: 0.0, temp: 26, windX: -0.15 },
+  { name: 'Light Drizzle', humidity: 0.95, rainRate: 0.15, temp: 21, windX: 0.35 },
+  { name: 'Heavy Rainstorm', humidity: 1.00, rainRate: 0.65, temp: 18, windX: -0.8 }
+];
+
+const PROJECTS = [
+  {
+    id: 'office3story',
+    name: '3-Story Apex Office Complex',
+    client: 'Apex Commercial Realty',
+    totalReward: 1250,
+    stages: [
+      {
+        id: 'walkway',
+        name: 'Stage 1: Front Concrete Walkway',
+        desc: 'Clean chewing gum, tire marks, and heavy organic silt from the main approach.',
+        reward: 320,
+        dirtType: 'walkway',
+        drawClean: drawWalkwayClean,
+        completed: false
+      },
+      {
+        id: 'facade_lower',
+        name: 'Stage 2: Ground & 2nd Story Facade',
+        desc: 'Wash ground storefront glass, limestone trim, and 2nd-floor brick from ground level.',
+        reward: 430,
+        dirtType: 'facade_lower',
+        drawClean: drawLowerFacadeClean,
+        completed: false
+      },
+      {
+        id: 'facade_upper',
+        name: 'Stage 3: 3rd Story Parapet & Roofline',
+        desc: 'Reach all the way to the top cornice. Pre-soak with foam to prevent upper runoff streaking.',
+        reward: 500,
+        dirtType: 'facade_upper',
+        drawClean: drawUpperFacadeClean,
+        completed: false
+      }
+    ]
+  },
+  {
+    id: 'plaza',
+    name: 'Riverwalk Amphitheater Plaza',
+    client: 'Metro Parks Dept.',
+    totalReward: 890,
+    stages: [
+      {
+        id: 'promenade',
+        name: 'Stage 1: Flagstone Promenade',
+        desc: 'Strip river silt, algae, and mildew from interlocking flagstone walkways.',
+        reward: 390,
+        dirtType: 'walkway',
+        drawClean: drawFlagstoneClean,
+        completed: false
+      },
+      {
+        id: 'clocktower',
+        name: 'Stage 2: 3-Story Clocktower Wall',
+        desc: 'Blast years of atmospheric soot and bird staining off the main clock face tower.',
+        reward: 500,
+        dirtType: 'facade_upper',
+        drawClean: drawClocktowerClean,
+        completed: false
+      }
+    ]
+  }
+];
+
+const UPGRADES = [
+  { id: 'psi',    name: '4200 PSI Hot-Water Skid Pump', desc: '+25% water cutting pressure and hardness penetration per level', level: 1, max: 5, baseCost: 250 },
+  { id: 'lance',  name: '28ft Telescopic Carbon Extension Wand', desc: '+20% spray radius & upper-story reach', level: 1, max: 5, baseCost: 280 },
+  { id: 'soap',   name: 'Downstream Chem Injector Rig', desc: 'Soft-wash foam dissolves grime 2.5x faster', level: 1, max: 4, baseCost: 220 }
+];
+
+// ================= STATE =================
+let state = {
+  mode: 'cutscene', // 'cutscene' | 'play'
+  cutsceneTime: 0,
+  cash: 350,
+  projectIdx: 0,
+  stageIdx: 0,
+  nozzleIdx: 1,
+  weatherIdx: 0,
+  weatherTimer: 0,
+  currentWeather: { ...WEATHER_STATES[0] },
+  pctClean: 0,
+  stageFinished: false,
+  scanPulse: 0,
+  mouse: { x: 400, y: 300, down: false },
+  particles: []
+};
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+const cleanCanvas = document.createElement('canvas');
+const cleanCtx = cleanCanvas.getContext('2d');
+const dirtCanvas = document.createElement('canvas');
+const dirtCtx = dirtCanvas.getContext('2d');
+const soapCanvas = document.createElement('canvas');
+const soapCtx = soapCanvas.getContext('2d');
+
+// Low-Resolution Fluid & Grime Simulation Grid
+let fluidGrid = null;
+const GRID_SCALE = 5; // Pixels per grid cell
+
+class FluidGrimeGrid {
+  constructor(w, h, isVertical) {
+    this.gw = Math.ceil(w / GRID_SCALE);
+    this.gh = Math.ceil(h / GRID_SCALE);
+    this.size = this.gw * this.gh;
+    this.isVertical = isVertical;
+
+    this.grime = new Float32Array(this.size);     // 0.0 (Clean) to 1.0 (Heavy Grime)
+    this.hardness = new Float32Array(this.size);  // 0.0 (Soft) to 1.0 (Baked Hard)
+    this.moisture = new Float32Array(this.size);  // 0.0 (Dry) to 1.0 (Saturated)
+    this.water = new Float32Array(this.size);     // Water depth / volume
+    this.sediment = new Float32Array(this.size);  // Suspended dirt in water
+    this.vx = new Float32Array(this.size);        // Horizontal velocity
+    this.vy = new Float32Array(this.size);        // Vertical velocity
+    this.foam = new Float32Array(this.size);      // Soap foam coverage
+    this.roughness = new Float32Array(this.size); // Material roughness
+    this.sun = new Float32Array(this.size);       // Sun exposure
+
+    this.initMaterialMap();
+  }
+
+  initMaterialMap() {
+    for (let y = 0; y < this.gh; y++) {
+      for (let x = 0; x < this.gw; x++) {
+        const i = y * this.gw + x;
+        const normY = y / this.gh;
+        // Roughness: Brick/Concrete = high (0.8), Glass/Metal = low (0.3)
+        this.roughness[i] = 0.75 - normY * 0.2 + Math.random() * 0.1;
+
+        // Base Grime & Hardness initialization
+        this.grime[i] = 0.85 + Math.random() * 0.15;
+        this.hardness[i] = 0.5 + Math.random() * 0.3;
+        this.moisture[i] = 0.1;
+      }
+    }
+  }
+
+  step(dt, weather) {
+    const { humidity, rainRate, temp, windX } = weather;
+    const evapRate = 0.035 * (1.1 - humidity) * (temp / 25);
+    const gx = windX * 14;
+    const gy = this.isVertical ? 180 : 25; // High gravity for vertical facades
+
+    // 1. Weather Accumulation & Grime Growth/Baking
+    for (let i = 0; i < this.size; i++) {
+      if (rainRate > 0) {
+        this.water[i] += rainRate * 0.35 * dt;
+        this.moisture[i] = Math.min(1, this.moisture[i] + rainRate * 2 * dt);
+      }
+
+      // Organic algae growth in humid/shaded areas + dry dust settling
+      const algaeGrowth = 0.018 * (humidity * humidity) * (1 - this.sun[i]) * this.moisture[i];
+      const dustGrowth = 0.009 * (1 - humidity) * this.roughness[i];
+      this.grime[i] = Math.min(1, this.grime[i] + (algaeGrowth + dustGrowth) * (1 - this.grime[i]) * dt);
+
+      // Baking vs Softening
+      if (this.moisture[i] < 0.2 && temp > 25) {
+        this.hardness[i] = Math.min(1, this.hardness[i] + 0.06 * dt);
+      } else if (this.moisture[i] > 0.6) {
+        this.hardness[i] = Math.max(0, this.hardness[i] - 0.3 * dt);
+      }
+    }
+
+    // 2. Fluid Runoff & Sediment Transport (Sweeping top-to-bottom / left-to-right)
+    for (let y = this.gh - 2; y >= 0; y--) {
+      for (let x = 1; x < this.gw - 1; x++) {
+        const i = y * this.gw + x;
+        const wDepth = this.water[i];
+
+        if (wDepth <= 0.005) {
+          this.moisture[i] = Math.max(0, this.moisture[i] - evapRate * dt);
+          continue;
+        }
+
+        // Velocity inertia & drag based on roughness
+        const drag = 1 - Math.min(0.92, this.roughness[i] * 0.9 * dt);
+        this.vx[i] = (this.vx[i] + gx * dt) * drag;
+        this.vy[i] = (this.vy[i] + gy * dt) * drag;
+
+        // Flow out to neighbor cells
+        const flowOut = Math.min(wDepth, wDepth * Math.min(1, (Math.abs(this.vy[i]) + Math.abs(this.vx[i])) * 0.035 * dt));
+        const targetX = Math.max(0, Math.min(this.gw - 1, x + Math.sign(this.vx[i])));
+        const targetY = Math.min(this.gh - 1, y + 1);
+        const ti = targetY * this.gw + targetX;
+
+        const sedRatio = this.sediment[i] / (wDepth + 1e-6);
+        const sedOut = flowOut * sedRatio;
+
+        this.water[i] -= flowOut;
+        this.sediment[i] = Math.max(0, this.sediment[i] - sedOut);
+        this.water[ti] += flowOut;
+        this.sediment[ti] += sedOut;
+        this.moisture[ti] = Math.min(1, this.moisture[ti] + 0.2 * dt);
+
+        // Sediment re-deposition (Streaking Mechanic)
+        const evap = Math.min(this.water[i], evapRate * dt);
+        this.water[i] -= evap;
+        if (this.water[i] < 0.05 && this.sediment[i] > 0) {
+          const depositRate = 0.5 * (1 - this.foam[i]); // Foam prevents redeposition
+          const deposit = this.sediment[i] * depositRate;
+          this.grime[i] = Math.min(1, this.grime[i] + deposit);
+          this.sediment[i] -= deposit;
+        }
+      }
+    }
+  }
+
+  applySpray(screenX, screenY, sprayRadius, nozzlePower, isSoapOverride) {
+    const startX = Math.max(0, Math.floor((screenX - sprayRadius) / GRID_SCALE));
+    const endX = Math.min(this.gw - 1, Math.floor((screenX + sprayRadius) / GRID_SCALE));
+    const startY = Math.max(0, Math.floor((screenY - sprayRadius) / GRID_SCALE));
+    const endY = Math.min(this.gh - 1, Math.floor((screenY + sprayRadius) / GRID_SCALE));
+
+    const lanceBonus = 1 + (UPGRADES[1].level - 1) * 0.20;
+    const psiBonus = 1 + (UPGRADES[0].level - 1) * 0.25;
+    const effectiveRadius = (sprayRadius / GRID_SCALE) * lanceBonus;
+
+    for (let gy = startY; gy <= endY; gy++) {
+      for (let gx = startX; gx <= endX; gx++) {
+        const i = gy * this.gw + gx;
+        const cx = gx * GRID_SCALE + GRID_SCALE/2;
+        const cy = gy * GRID_SCALE + GRID_SCALE/2;
+        const dist = Math.hypot(screenX - cx, screenY - cy);
+
+        if (dist < effectiveRadius) {
+          const falloff = 1 - (dist / effectiveRadius);
+          this.water[i] += falloff * 0.45;
+          this.moisture[i] = 1.0;
+
+          if (isSoapOverride) {
+            this.foam[i] = Math.min(1, this.foam[i] + falloff * 0.8);
+          } else {
+            // Erosion calculation
+            const soakFactor = (this.foam[i] > 0.5 || this.moisture[i] > 0.8) ? 1.6 : 1.0;
+            const effectivePSI = nozzlePower * psiBonus * soakFactor;
+            const resistance = this.hardness[i] * 0.6 + this.roughness[i] * 0.4;
+
+            if (effectivePSI > resistance * 0.4) {
+              const removeAmount = (effectivePSI - resistance * 0.4) * falloff * 0.35;
+              const detached = Math.min(this.grime[i], removeAmount);
+              this.grime[i] -= detached;
+              this.sediment[i] += detached * 0.9; // Suspended in water
+            }
+          }
+        }
+      }
+    }
+  }
+
+  renderToCanvases() {
+    dirtCtx.clearRect(0, 0, dirtCanvas.width, dirtCanvas.height);
+    soapCtx.clearRect(0, 0, soapCanvas.width, soapCanvas.height);
+
+    for (let gy = 0; gy < this.gh; gy++) {
+      for (let gx = 0; gx < this.gw; gx++) {
+        const i = gy * this.gw + gx;
+        const px = gx * GRID_SCALE;
+        const py = gy * GRID_SCALE;
+
+        // Render Grime layer
+        if (this.grime[i] > 0.05) {
+          // Tint based on material/moisture (greenish algae when wet, brown soot when dry)
+          const isGreen = this.moisture[i] > 0.5 && Math.random() > 0.4;
+          dirtCtx.fillStyle = isGreen ? `rgba(34, 65, 20, ${this.grime[i] * 0.85})` : `rgba(55, 45, 32, ${this.grime[i] * 0.9})`;
+          dirtCtx.fillRect(px, py, GRID_SCALE, GRID_SCALE);
+        }
+
+        // Render Soap Foam
+        if (this.foam[i] > 0.1) {
+          soapCtx.fillStyle = `rgba(224, 242, 254, ${Math.min(1, this.foam[i])})`;
+          soapCtx.fillRect(px, py, GRID_SCALE, GRID_SCALE);
+        }
+
+        // Render Runoff Streaks (Visual wetness + sediment)
+        const wDepth = this.water[i];
+        if (wDepth > 0.1) {
+          const sedRatio = this.sediment[i] / (wDepth + 1e-6);
+          const alpha = Math.min(0.7, wDepth * 0.3);
+          soapCtx.fillStyle = sedRatio > 0.3 ? `rgba(92, 68, 42, ${alpha})` : `rgba(186, 230, 253, ${alpha})`;
+          soapCtx.fillRect(px, py, GRID_SCALE, GRID_SCALE);
+        }
+      }
+    }
+  }
+}
+
+// ================= CUTSCENE RENDERING (RAM TRUCK + RIG + CHARACTER) =================
+function drawCutscene(dt) {
+  state.cutsceneTime += dt;
+  const t = state.cutsceneTime;
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // Sky & Background Building Silhouette
+  const sky = ctx.createLinearGradient(0, 0, 0, h * 0.72);
+  sky.addColorStop(0, '#090d13');
+  sky.addColorStop(0.5, '#1e3a5f');
+  sky.addColorStop(1, '#38bdf8');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, w, h);
+
+  // Distant City Skyline
+  ctx.fillStyle = '#0f291e';
+  for (let i = 0; i < w; i += 120) {
+    ctx.fillRect(i, h * 0.68 - 140, 70, 140);
+    ctx.fillStyle = '#1e3a5f';
+    ctx.fillRect(i + 20, h * 0.68 - 90, 30, 90);
+  }
+
+  // 3-Story Commercial Office Building on Right Side
+  const bldgW = Math.min(460, w * 0.45);
+  const bldgH = Math.min(480, h * 0.65);
+  const bldgX = w - bldgW - 60;
+  const bldgY = h * 0.72 - bldgH;
+
+  ctx.fillStyle = '#5d2e21';
+  ctx.fillRect(bldgX, bldgY, bldgW, bldgH);
+
+  // Cornice & Roofline
+  ctx.fillStyle = '#334155';
+  ctx.fillRect(bldgX - 10, bldgY - 16, bldgW + 20, 20);
+
+  // 3 Stories of Windows
+  for (let floor = 0; floor < 3; floor++) {
+    const wy = bldgY + 36 + floor * (bldgH / 3.1);
+    for (let col = 0; col < 4; col++) {
+      const wx = bldgX + 32 + col * ((bldgW - 64) / 3.3);
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(wx, wy, 52, 70);
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.2)';
+      ctx.fillRect(wx + 4, wy + 4, 44, 62);
+    }
+  }
+
+  // Concrete Walkway & Asphalt Road
+  const roadY = h * 0.72;
+  ctx.fillStyle = '#64748b'; // Sidewalk / Walkway
+  ctx.fillRect(0, roadY - 20, w, 28);
+
+  ctx.fillStyle = '#1e293b'; // Asphalt road
+  ctx.fillRect(0, roadY + 8, w, h - roadY);
+  // Road dashed line
+  ctx.strokeStyle = '#eab308';
+  ctx.lineWidth = 5;
+  ctx.setLineDash([32, 28]);
+  ctx.beginPath();
+  ctx.moveTo(0, roadY + 65);
+  ctx.lineTo(w, roadY + 65);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // RAM Truck & Trailer Animation Timing
+  const targetTruckX = Math.max(280, bldgX - 220);
+  const driveProgress = Math.min(1, t / 2.8);
+  const easeOut = 1 - Math.pow(1 - driveProgress, 3);
+  const truckX = -420 + (targetTruckX + 420) * easeOut;
+  const truckY = roadY + 14;
+
+  if (t >= 2.75 && t < 2.82 && !state.hornPlayed) {
+    state.hornPlayed = true;
+    sound.playTruckHorn();
+  }
+
+  // Update banner text
+  const banner = document.getElementById('cutscene-text');
+  if (t < 2.8) {
+    banner.textContent = 'Transit to Apex 3-Story Office Complex...';
+  } else if (t < 3.8) {
+    banner.textContent = 'Rig Parked — Unloading High-Reach Pressure Wand';
+  } else {
+    banner.textContent = 'Operator Deployed — Ready for Stage 1: Front Walkway';
+  }
+
+  drawRamTruckAndRig(ctx, truckX, truckY, t < 2.8 ? t * 16 : 0, t > 3.0);
+
+  // Character Hopping Out & Walking toward Walkway
+  if (t > 3.0) {
+    const hopT = Math.min(1, (t - 3.0) / 0.55);
+    const walkT = Math.max(0, Math.min(1, (t - 3.5) / 1.4));
+    const charStartX = truckX - 35;
+    const charEndX = bldgX - 35;
+    const charX = charStartX + (charEndX - charStartX) * walkT;
+    const hopArc = Math.sin(hopT * Math.PI) * 20;
+    const walkBob = walkT > 0 && walkT < 1 ? Math.abs(Math.sin(t * 16)) * 6 : 0;
+    const charY = (truckY - 12) - hopArc - walkBob - walkT * 18;
+
+    drawOperatorCharacter(ctx, charX, charY, walkT > 0.8);
+  }
+
+  if (t >= 5.5) {
+    finishCutscene();
+  }
+}
+
+function drawRamTruckAndRig(c, x, y, wheelRot, doorOpen) {
+  c.save();
+  c.translate(x, y);
+
+  // === TANDEM AXLE PRESSURE WASHING TRAILER RIG ===
+  const trX = -340;
+  // Hitch bar
+  c.fillStyle = '#334155';
+  c.fillRect(trX + 200, -16, 50, 6);
+  // Trailer frame
+  c.fillStyle = '#0f172a';
+  c.fillRect(trX, -22, 205, 12);
+  // 300-Gallon IBC Water Tote Tank
+  c.fillStyle = 'rgba(226, 232, 240, 0.95)';
+  c.fillRect(trX + 18, -78, 76, 56);
+  // Water level inside IBC tote
+  c.fillStyle = 'rgba(56, 189, 248, 0.7)';
+  c.fillRect(trX + 20, -62, 72, 40);
+  // Metal cage on tote
+  c.strokeStyle = '#475569';
+  c.lineWidth = 2.5;
+  c.strokeRect(trX + 18, -78, 76, 56);
+  c.beginPath();
+  c.moveTo(trX + 42, -78); c.lineTo(trX + 42, -22);
+  c.moveTo(trX + 66, -78); c.lineTo(trX + 66, -22);
+  c.moveTo(trX + 18, -50); c.lineTo(trX + 94, -50);
+  c.stroke();
+
+  // Hot-Water Skid Burner & Engine Unit
+  c.fillStyle = '#dc2626'; // Red skid frame
+  c.fillRect(trX + 104, -68, 52, 46);
+  c.fillStyle = '#1e293b';
+  c.fillRect(trX + 112, -82, 24, 14); // Exhaust stack
+
+  // Dual High-Pressure Hose Reels
+  c.fillStyle = '#eab308'; // Yellow hose reel
+  c.beginPath();
+  c.arc(trX + 180, -46, 20, 0, Math.PI * 2);
+  c.fill();
+  c.strokeStyle = '#0f172a';
+  c.lineWidth = 4;
+  c.stroke();
+
+  // Trailer Dual Wheels
+  drawWheel(c, trX + 70, -6, 18, wheelRot);
+  drawWheel(c, trX + 120, -6, 18, wheelRot);
+
+  // === RAM 2500 HEAVY DUTY PICKUP TRUCK ===
+  // Truck Bed
+  c.fillStyle = '#0284c7'; // Commercial Blue RAM paint
+  c.beginPath();
+  c.roundRect(-105, -60, 105, 45, [4, 0, 0, 4]);
+  c.fill();
+  // Chrome bed rail cap
+  c.fillStyle = '#e2e8f0';
+  c.fillRect(-103, -64, 100, 4);
+
+  // Crew Cab
+  c.fillStyle = '#0284c7';
+  c.beginPath();
+  c.moveTo(0, -60);
+  c.lineTo(16, -88);
+  c.lineTo(90, -88);
+  c.lineTo(112, -60);
+  c.lineTo(112, -15);
+  c.lineTo(0, -15);
+  c.closePath();
+  c.fill();
+
+  // Front Hood & RAM Crosshair Grille
+  c.fillStyle = '#0369a1';
+  c.beginPath();
+  c.roundRect(110, -60, 62, 45, [0, 10, 4, 0]);
+  c.fill();
+  // Chrome Grille & Bumper
+  c.fillStyle = '#f8fafc';
+  c.fillRect(164, -56, 8, 30);
+  c.fillRect(160, -24, 16, 10);
+  // LED Headlight
+  c.fillStyle = '#fef08a';
+  c.fillRect(162, -52, 8, 12);
+
+  // Cab Windows
+  c.fillStyle = '#0f172a';
+  c.beginPath();
+  c.moveTo(18, -83);
+  c.lineTo(48, -83);
+  c.lineTo(48, -60);
+  c.lineTo(10, -60);
+  c.closePath();
+  c.fill();
+
+  c.beginPath();
+  c.moveTo(56, -83);
+  c.lineTo(86, -83);
+  c.lineTo(104, -60);
+  c.lineTo(56, -60);
+  c.closePath();
+  c.fill();
+
+  // Open Door Effect
+  if (doorOpen) {
+    c.fillStyle = '#0369a1';
+    c.fillRect(50, -60, 16, 45);
+  }
+
+  // RAM Door Emblem & Chrome Side Step
+  c.fillStyle = '#f8fafc';
+  c.font = 'bold 10px sans-serif';
+  c.fillText('RAM 2500', 58, -44);
+  c.fillRect(10, -13, 96, 5);
+
+  // Truck Heavy Duty Wheels
+  drawWheel(c, -55, -4, 22, wheelRot);
+  drawWheel(c, 134, -4, 22, wheelRot);
+
+  c.restore();
+}
+
+function drawWheel(c, x, y, r, rot) {
+  c.save();
+  c.translate(x, y);
+  c.rotate(rot);
+  c.fillStyle = '#090d13';
+  c.beginPath();
+  c.arc(0, 0, r, 0, Math.PI * 2);
+  c.fill();
+  c.fillStyle = '#94a3b8';
+  c.beginPath();
+  c.arc(0, 0, r * 0.55, 0, Math.PI * 2);
+  c.fill();
+  c.strokeStyle = '#334155';
+  c.lineWidth = 3;
+  c.beginPath();
+  c.moveTo(-r * 0.5, 0); c.lineTo(r * 0.5, 0);
+  c.moveTo(0, -r * 0.5); c.lineTo(0, r * 0.5);
+  c.stroke();
+  c.restore();
+}
+
+function drawOperatorCharacter(c, x, y, holdingWand) {
+  c.save();
+  c.translate(x, y);
+  // Heavy Duty Work Boots
+  c.fillStyle = '#0f172a';
+  c.fillRect(-8, -8, 7, 8);
+  c.fillRect(2, -8, 7, 8);
+  // Rugged Work Pants
+  c.fillStyle = '#1e3a8a';
+  c.fillRect(-8, -26, 17, 18);
+  // Hi-Vis Safety Work Shirt
+  c.fillStyle = '#ccff00';
+  c.fillRect(-9, -46, 19, 20);
+  c.fillStyle = '#334155'; // Reflective cross stripes
+  c.fillRect(-9, -38, 19, 4);
+  // Head & Hard Hat
+  c.fillStyle = '#fcd34d';
+  c.beginPath();
+  c.arc(0, -53, 8, 0, Math.PI * 2);
+  c.fill();
+  c.fillStyle = '#ea580c'; // Orange safety helmet
+  c.fillRect(-8, -62, 17, 6);
+  c.fillRect(-2, -65, 6, 3);
+
+  // High-Pressure Washing Wand
+  if (holdingWand) {
+    c.strokeStyle = '#cbd5e1';
+    c.lineWidth = 4;
+    c.beginPath();
+    c.moveTo(6, -38);
+    c.lineTo(42, -54);
+    c.stroke();
+    c.fillStyle = '#ef4444';
+    c.fillRect(40, -57, 6, 6);
+  }
+  c.restore();
+}
+
+function skipCutscene() {
+  finishCutscene();
+}
+
+function finishCutscene() {
+  if (state.mode === 'play') return;
+  state.mode = 'play';
+  document.getElementById('cutscene-ui').classList.add('hidden');
+  document.getElementById('hud-top').classList.remove('hidden');
+  document.getElementById('stage-hud').classList.remove('hidden');
+  document.getElementById('weather-hud').classList.remove('hidden');
+  document.getElementById('hud-bottom').classList.remove('hidden');
+  loadStage(state.projectIdx, state.stageIdx);
+}
+
+// ================= STAGE ARTWORK GENERATORS =================
+function drawWalkwayClean(c, w, h) {
+  c.fillStyle = '#cbd5e1';
+  c.fillRect(0, 0, w, h);
+
+  // Concrete Aggregate Texture
+  for (let i = 0; i < 6000; i++) {
+    c.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.25)' : 'rgba(100,116,139,0.2)';
+    c.fillRect(Math.random() * w, Math.random() * h, 2.5, 2.5);
+  }
+
+  // Expansion Joint Grid Lines
+  c.strokeStyle = '#94a3b8';
+  c.lineWidth = 4;
+  const cols = 6, rows = 4;
+  for (let i = 1; i < cols; i++) {
+    c.beginPath(); c.moveTo((w / cols) * i, 0); c.lineTo((w / cols) * i, h); c.stroke();
+  }
+  for (let j = 1; j < rows; j++) {
+    c.beginPath(); c.moveTo(0, (h / rows) * j); c.lineTo(w, (h / rows) * j); c.stroke();
+  }
+
+  // Decorative Brick Border Strips
+  c.fillStyle = '#c2410c';
+  c.fillRect(0, 0, w, 52);
+  c.fillRect(0, h - 52, w, 52);
+  c.strokeStyle = '#ffedd5';
+  c.lineWidth = 3;
+  for (let bx = 0; bx < w; bx += 42) {
+    c.strokeRect(bx, 4, 40, 44);
+    c.strokeRect(bx, h - 48, 40, 44);
+  }
+
+  // Lobby Entrance Mat & Brass Inlay
+  c.fillStyle = '#0f172a';
+  c.fillRect(w * 0.35, h * 0.25, w * 0.3, h * 0.5);
+  c.strokeStyle = '#f59e0b';
+  c.lineWidth = 6;
+  c.strokeRect(w * 0.35 + 10, h * 0.25 + 10, w * 0.3 - 20, h * 0.5 - 20);
+  c.fillStyle = '#f8fafc';
+  c.font = 'bold 28px sans-serif';
+  c.textAlign = 'center';
+  c.fillText('APEX PLAZA', w * 0.5, h * 0.53);
+}
+
+function drawLowerFacadeClean(c, w, h) {
+  c.fillStyle = '#b45309';
+  c.fillRect(0, 0, w, h);
+
+  // Brick masonry pattern
+  const bw = 54, bh = 24;
+  for (let y = 0; y < h; y += bh) {
+    const offset = (Math.floor(y / bh) % 2) * (bw / 2);
+    for (let x = -bw; x < w + bw; x += bw) {
+      c.fillStyle = ((x + y) % 3 === 0) ? '#9a3412' : '#c2410c';
+      c.fillRect(x + offset + 2, y + 2, bw - 4, bh - 4);
+    }
+  }
+
+  // Limestone Belt Course
+  c.fillStyle = '#f1f5f9';
+  c.fillRect(0, h * 0.46, w, 32);
+  c.strokeStyle = '#94a3b8';
+  c.lineWidth = 3;
+  c.strokeRect(0, h * 0.46, w, 32);
+
+  // 2nd Story Windows
+  const winCount = 5;
+  const spacing = w / (winCount + 1);
+  for (let i = 1; i <= winCount; i++) {
+    const wx = spacing * i - 54;
+    const wy = h * 0.12;
+    c.fillStyle = '#f8fafc';
+    c.fillRect(wx - 8, wy - 8, 124, 140);
+    const glass = c.createLinearGradient(wx, wy, wx + 108, wy + 124);
+    glass.addColorStop(0, '#0284c7');
+    glass.addColorStop(0.5, '#38bdf8');
+    glass.addColorStop(1, '#0369a1');
+    c.fillStyle = glass;
+    c.fillRect(wx, wy, 108, 124);
+  }
+
+  // Ground Level Storefront Glass & Revolving Doors
+  for (let i = 1; i <= winCount; i++) {
+    const wx = spacing * i - 60;
+    const wy = h * 0.58;
+    c.fillStyle = '#0d9488';
+    c.fillRect(wx - 6, wy - 6, 132, h * 0.42 + 6);
+    const storefront = c.createLinearGradient(wx, wy, wx + 120, wy + 200);
+    storefront.addColorStop(0, '#042f2e');
+    storefront.addColorStop(1, '#115e59');
+    c.fillStyle = storefront;
+    c.fillRect(wx, wy, 120, h * 0.42);
+  }
+}
+
+function drawUpperFacadeClean(c, w, h) {
+  // Sky above roofline
+  const sky = c.createLinearGradient(0, 0, 0, h * 0.25);
+  sky.addColorStop(0, '#0284c7');
+  sky.addColorStop(1, '#7dd3fc');
+  c.fillStyle = sky;
+  c.fillRect(0, 0, w, h * 0.25);
+
+  // 3rd Story Brick Wall
+  c.fillStyle = '#b45309';
+  c.fillRect(0, h * 0.22, w, h * 0.78);
+
+  const bw = 54, bh = 24;
+  for (let y = Math.floor(h * 0.22); y < h; y += bh) {
+    const offset = (Math.floor(y / bh) % 2) * (bw / 2);
+    for (let x = -bw; x < w + bw; x += bw) {
+      c.fillStyle = ((x + y) % 3 === 0) ? '#9a3412' : '#c2410c';
+      c.fillRect(x + offset + 2, y + 2, bw - 4, bh - 4);
+    }
+  }
+
+  // Ornate Limestone Parapet & Roofline Cornice
+  c.fillStyle = '#f8fafc';
+  c.fillRect(0, h * 0.18, w, 40);
+  c.fillStyle = '#cbd5e1';
+  c.fillRect(0, h * 0.23, w, 16);
+
+  // 3rd Story Arch Windows
+  const winCount = 5;
+  const spacing = w / (winCount + 1);
+  for (let i = 1; i <= winCount; i++) {
+    const wx = spacing * i - 54;
+    const wy = h * 0.36;
+    c.fillStyle = '#f8fafc';
+    c.beginPath();
+    c.arc(wx + 54, wy, 60, Math.PI, 0);
+    c.lineTo(wx + 114, wy + 160);
+    c.lineTo(wx - 6, wy + 160);
+    c.closePath();
+    c.fill();
+
+    c.fillStyle = '#38bdf8';
+    c.beginPath();
+    c.arc(wx + 54, wy, 52, Math.PI, 0);
+    c.lineTo(wx + 106, wy + 152);
+    c.lineTo(wx + 2, wy + 152);
+    c.closePath();
+    c.fill();
+  }
+
+  // Lower trim bar
+  c.fillStyle = '#e2e8f0';
+  c.fillRect(0, h * 0.88, w, 32);
+}
+
+function drawFlagstoneClean(c, w, h) {
+  c.fillStyle = '#94a3b8';
+  c.fillRect(0, 0, w, h);
+  const colors = ['#cbd5e1', '#d6d3d1', '#e2e8f0', '#a8a29e'];
+  for (let y = 10; y < h; y += 72) {
+    for (let x = 10; x < w; x += 96) {
+      c.fillStyle = colors[(x + y) % colors.length];
+      c.beginPath();
+      c.roundRect(x + (y % 14), y + (x % 10), 84, 60, 14);
+      c.fill();
+    }
+  }
+}
+
+function drawClocktowerClean(c, w, h) {
+  drawUpperFacadeClean(c, w, h);
+  // Central Giant Clock Face
+  const cx = w / 2, cy = h * 0.54, r = Math.min(w, h) * 0.24;
+  c.fillStyle = '#0f172a';
+  c.beginPath(); c.arc(cx, cy, r + 16, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#f8fafc';
+  c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fill();
+  c.strokeStyle = '#0f172a';
+  c.lineWidth = 10;
+  c.beginPath();
+  c.moveTo(cx, cy); c.lineTo(cx, cy - r * 0.65);
+  c.moveTo(cx, cy); c.lineTo(cx + r * 0.55, cy);
+  c.stroke();
+}
+
+// ================= GAMEPLAY LOGIC =================
+function loadStage(projectIdx, stageIdx) {
+  state.projectIdx = projectIdx;
+  state.stageIdx = stageIdx;
+  state.stageFinished = false;
+  state.pctClean = 0;
+
+  const proj = PROJECTS[projectIdx];
+  const stage = proj.stages[stageIdx];
+
+  cleanCanvas.width = canvas.width;
+  cleanCanvas.height = canvas.height;
+  dirtCanvas.width = canvas.width;
+  dirtCanvas.height = canvas.height;
+  soapCanvas.width = canvas.width;
+  soapCanvas.height = canvas.height;
+
+  stage.drawClean(cleanCtx, canvas.width, canvas.height);
+  fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'));
+
+  updateHUD();
+}
+
+function updateWeather(dt) {
+  state.weatherTimer += dt;
+  if (state.weatherTimer > 45) { // Shift weather every 45 seconds
+    state.weatherTimer = 0;
+    state.weatherIdx = (state.weatherIdx + 1) % WEATHER_STATES.length;
+    state.currentWeather = { ...WEATHER_STATES[state.weatherIdx] };
+  }
+
+  // Update weather HUD
+  document.getElementById('weather-state-name').textContent = state.currentWeather.name;
+  document.getElementById('wh-humidity').textContent = `${Math.round(state.currentWeather.humidity * 100)}%`;
+  document.getElementById('wh-rain').textContent = (state.currentWeather.rainRate * 3.5).toFixed(1) + ' in/hr';
+  document.getElementById('wh-temp').textContent = `${state.currentWeather.temp}°C`;
+  document.getElementById('wh-particles').textContent = state.particles.length;
+}
+
+function spawnSprayParticles(x, y, nozzle) {
+  const lanceBonus = 1 + (UPGRADES[1].level - 1) * 0.20;
+  const radius = nozzle.radius * lanceBonus;
+
+  for (let i = 0; i < 8; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = Math.random() * radius * 0.9;
+    state.particles.push({
+      x: x + Math.cos(angle) * dist,
+      y: y + Math.sin(angle) * dist,
+      vx: (Math.random() - 0.5) * 6 + state.currentWeather.windX * 10,
+      vy: (Math.random() - 0.5) * 6 - 2.5,
+      life: 1,
+      maxLife: 1,
+      color: nozzle.isSoap ? '#e0f2fe' : '#bae6fd',
+      size: nozzle.isSoap ? 5 : 3
+    });
+  }
+}
+
+function measureCleanliness() {
+  if (!fluidGrid) return;
+  let totalGrime = 0;
+  for (let i = 0; i < fluidGrid.size; i++) {
+    totalGrime += fluidGrid.grime[i];
+  }
+  const maxInitialGrime = fluidGrid.size * 0.9;
+  const pct = Math.max(0, Math.min(100, (1 - totalGrime / maxInitialGrime) * 100));
+  state.pctClean = pct;
+
+  document.getElementById('ui-progress').style.width = `${pct}%`;
+  document.getElementById('ui-pct').textContent = `${pct.toFixed(1)}%`;
+
+  if (pct >= 98.2 && !state.stageFinished) {
+    completeCurrentStage();
+  }
+}
+
+function completeCurrentStage() {
+  state.stageFinished = true;
+  state.pctClean = 100;
+  document.getElementById('ui-progress').style.width = '100%';
+  document.getElementById('ui-pct').textContent = '100%';
+
+  const proj = PROJECTS[state.projectIdx];
+  const stage = proj.stages[state.stageIdx];
+  stage.completed = true;
+  state.cash += stage.reward;
+  sound.playChime();
+  updateHUD();
+
+  const hasNextStage = state.stageIdx + 1 < proj.stages.length;
+  showToast(hasNextStage
+    ? `✅ ${stage.name.replace(/^Stage \d+:\s*/, '')} Complete! +$${stage.reward} — Advancing...`
+    : `🏆 Entire Contract Complete! +$${stage.reward} Final Payout!`
+  );
+
+  setTimeout(() => {
+    if (hasNextStage) {
+      loadStage(state.projectIdx, state.stageIdx + 1);
+    } else {
+      openModal('jobs-modal');
+    }
+  }, 2500);
+}
+
+function triggerDirtScan() {
+  state.scanPulse = 1.0;
+}
+
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+
+// ================= HUD & MODALS =================
+function updateHUD() {
+  const proj = PROJECTS[state.projectIdx];
+  const stage = proj.stages[state.stageIdx];
+  document.getElementById('ui-job-name').textContent = proj.name;
+  document.getElementById('ui-stage-badge').textContent = `${stage.name} (${state.stageIdx + 1}/${proj.stages.length})`;
+  document.getElementById('ui-cash').textContent = `$${state.cash}`;
+
+  // Stage Sub-HUD list
+  const stageList = document.getElementById('stage-list');
+  stageList.innerHTML = proj.stages.map((st, idx) => {
+    const cls = st.completed ? 'done' : idx === state.stageIdx ? 'active' : '';
+    const icon = st.completed ? '✅' : idx === state.stageIdx ? '▶' : '○';
+    return `<div class="stage-item ${cls}">
+      <span>${icon} ${st.name.replace(/^Stage \d+:\s*/, '')}</span>
+      <span>$${st.reward}</span>
+    </div>`;
+  }).join('');
+}
+
+function buildNozzleDock() {
+  const dock = document.getElementById('nozzle-dock');
+  dock.innerHTML = NOZZLES.map((n, idx) => `
+    <button class="nozzle-btn ${idx === state.nozzleIdx ? 'active' : ''}" onclick="selectNozzle(${idx})" title="${n.desc}">
+      <span class="nozzle-dot" style="background:${n.color}"></span>
+      <span class="nozzle-name">${n.name}</span>
+      <span class="nozzle-key">[${idx + 1}]</span>
+    </button>
+  `).join('');
+}
+
+function selectNozzle(idx) {
+  state.nozzleIdx = idx;
+  buildNozzleDock();
+}
+
+function openModal(id) {
+  state.mouse.down = false;
+  sound.setSpray(false);
+  if (id === 'jobs-modal') renderJobsModal();
+  if (id === 'shop-modal') renderShopModal();
+  document.getElementById(id).classList.add('open');
+}
+
+function closeModals() {
+  document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('open'));
+}
+
+function renderJobsModal() {
+  const list = document.getElementById('jobs-list');
+  list.innerHTML = PROJECTS.map((p, pIdx) => `
+    <div class="card" style="flex-direction:column;align-items:stretch;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-info">
+          <h3>${p.name}</h3>
+          <p>Client: ${p.client} • Total Contract Value: <strong style="color:#34d399">$${p.totalReward}</strong></p>
+        </div>
+        <button class="primary" onclick="startProjectStage(${pIdx}, 0)">Start Contract</button>
+      </div>
+      <div class="stage-pills">
+        ${p.stages.map((st, sIdx) => `
+          <button class="pill" onclick="startProjectStage(${pIdx}, ${sIdx})">
+            ${st.completed ? '✅' : '▶'} ${st.name.replace(/^Stage \d+:\s*/, '')} ($${st.reward})
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+function startProjectStage(pIdx, sIdx) {
+  closeModals();
+  loadStage(pIdx, sIdx);
+}
+
+function renderShopModal() {
+  const list = document.getElementById('shop-list');
+  list.innerHTML = UPGRADES.map((u, idx) => {
+    const cost = Math.round(u.baseCost * Math.pow(1.35, u.level - 1));
+    const maxed = u.level >= u.max;
+    return `
+      <div class="card">
+        <div class="card-info">
+          <h3>${u.name} (Lv. ${u.level}/${u.max})</h3>
+          <p>${u.desc}</p>
+        </div>
+        <button class="primary" ${maxed || state.cash < cost ? 'disabled style="opacity:0.45;cursor:not-allowed"' : ''} onclick="buyUpgrade(${idx})">
+          ${maxed ? 'MAXED' : `Upgrade ($${cost})`}
+        </button>
+      </div>
+    `;
+  }).join('');
+}
+
+function buyUpgrade(idx) {
+  const u = UPGRADES[idx];
+  const cost = Math.round(u.baseCost * Math.pow(1.35, u.level - 1));
+  if (u.level < u.max && state.cash >= cost) {
+    state.cash -= cost;
+    u.level++;
+    sound.playChime();
+    updateHUD();
+    renderShopModal();
+  }
+}
+
+// ================= MAIN LOOP & EVENTS =================
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  if (state.mode === 'play') {
+    cleanCanvas.width = canvas.width;
+    cleanCanvas.height = canvas.height;
+    const proj = PROJECTS[state.projectIdx];
+    proj.stages[state.stageIdx].drawClean(cleanCtx, canvas.width, canvas.height);
+    fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, proj.stages[state.stageIdx].dirtType.startsWith('facade'));
+  }
+}
+window.addEventListener('resize', resize);
+
+canvas.addEventListener('mousemove', e => {
+  state.mouse.x = e.clientX;
+  state.mouse.y = e.clientY;
+});
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 0 && state.mode === 'play') {
+    state.mouse.down = true;
+    sound.setSpray(true, NOZZLES[state.nozzleIdx]);
+  }
+});
+window.addEventListener('mouseup', () => {
+  state.mouse.down = false;
+  sound.setSpray(false);
+});
+window.addEventListener('wheel', e => {
+  if (state.mode !== 'play') return;
+  const dir = e.deltaY > 0 ? 1 : -1;
+  selectNozzle((state.nozzleIdx + dir + NOZZLES.length) % NOZZLES.length);
+});
+window.addEventListener('keydown', e => {
+  if (e.key >= '1' && e.key <= '5') selectNozzle(parseInt(e.key) - 1);
+  if (e.key === 'Tab' || e.key.toLowerCase() === 'h') {
+    e.preventDefault();
+    triggerDirtScan();
+  }
+  if (e.key === 'Escape') closeModals();
+});
+
+let lastTime = performance.now();
+let measureTimer = 0;
+
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (state.mode === 'cutscene') {
+    drawCutscene(dt);
+  } else {
+    updateWeather(dt);
+
+    if (fluidGrid) {
+      if (state.mouse.down) {
+        const nozzle = NOZZLES[state.nozzleIdx];
+        fluidGrid.applySpray(state.mouse.x, state.mouse.y, nozzle.radius, nozzle.power, nozzle.isSoap);
+        spawnSprayParticles(state.mouse.x, state.mouse.y, nozzle);
+      }
+
+      fluidGrid.step(dt, state.currentWeather);
+      fluidGrid.renderToCanvases();
+
+      measureTimer += dt;
+      if (measureTimer > 0.15) {
+        measureTimer = 0;
+        measureCleanliness();
+      }
+    }
+
+    // Composite Layers: Clean Surface + Dirty Grime Mask + Wet Soap/Runoff
+    ctx.drawImage(cleanCanvas, 0, 0);
+    ctx.drawImage(dirtCanvas, 0, 0);
+    ctx.drawImage(soapCanvas, 0, 0);
+
+    // Dynamic Rain Overlay during storm conditions
+    if (state.currentWeather.rainRate > 0) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(210, 240, 255, 0.35)';
+      ctx.lineWidth = 1.5;
+      for (let r = 0; r < 400; r++) {
+        const rx = Math.random() * canvas.width;
+        const ry = Math.random() * canvas.height;
+        ctx.beginPath();
+        ctx.moveTo(rx, ry);
+        ctx.lineTo(rx - state.currentWeather.windX * 25, ry + 35);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // Dirt Scan Radar Pulse Overlay
+    if (state.scanPulse > 0) {
+      state.scanPulse = Math.max(0, state.scanPulse - dt * 0.65);
+      ctx.save();
+      ctx.globalAlpha = Math.sin(state.scanPulse * Math.PI) * 0.7;
+      ctx.globalCompositeOperation = 'source-atop';
+      ctx.fillStyle = '#f97316';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    // Ground-Level Operator & High-Reach Hose Line at Bottom of Screen
+    const stage = PROJECTS[state.projectIdx].stages[state.stageIdx];
+    const isHighStory = stage.dirtType.startsWith('facade');
+    const opX = Math.max(140, Math.min(canvas.width - 140, state.mouse.x * 0.38 + canvas.width * 0.31));
+    const opY = canvas.height - 10;
+
+    // High-Pressure Yellow Hose Line from Bottom-Left Rig to Operator
+    ctx.strokeStyle = '#eab308';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(0, canvas.height - 18);
+    ctx.quadraticCurveTo(opX * 0.45, canvas.height - 40, opX - 10, opY - 24);
+    ctx.stroke();
+
+    // Operator silhouette at ground level aiming upward
+    drawOperatorCharacter(ctx, opX, opY, false);
+
+    // Water stream from ground wand up to cursor when spraying
+    if (state.mouse.down) {
+      const nozzle = NOZZLES[state.nozzleIdx];
+      ctx.save();
+      ctx.strokeStyle = nozzle.isSoap ? 'rgba(224,242,254,0.7)' : 'rgba(186,230,253,0.85)';
+      ctx.lineWidth = isHighStory ? 6 : 4;
+      ctx.beginPath();
+      ctx.moveTo(opX + 8, opY - 42);
+      ctx.lineTo(state.mouse.x, state.mouse.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Update & render physics splash particles
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.22; // Gravity
+      p.life -= dt * 2.5;
+      if (p.life <= 0) {
+        state.particles.splice(i, 1);
+        continue;
+      }
+      ctx.globalAlpha = p.life;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Custom Nozzle Reticle
+    const nozzle = NOZZLES[state.nozzleIdx];
+    const lanceBonus = 1 + (UPGRADES[1].level - 1) * 0.20;
+    const r = nozzle.radius * lanceBonus;
+    ctx.strokeStyle = nozzle.color;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(state.mouse.x, state.mouse.y, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(state.mouse.x, state.mouse.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+// Init
+resize();
+buildNozzleDock();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
