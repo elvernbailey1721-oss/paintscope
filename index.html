@@ -445,7 +445,7 @@ const sound = new SoundEngine();
 
 function toggleAudio() {
   sound.enabled = !sound.enabled;
-  if (!sound.enabled && sound.gainNode) sound.gainNode.gain.value = 0;
+  if (!sound.enabled && sound.gainNode) { sound.gainNode.gain.value = 0; sound.isSpraying = false; }
   document.getElementById('audio-btn').textContent = sound.enabled ? '🔊 Audio' : '🔇 Muted';
 }
 
@@ -600,8 +600,12 @@ class FluidGrimeGrid {
         this.grime[i] = 0.85 + Math.random() * 0.15;
         this.hardness[i] = 0.5 + Math.random() * 0.3;
         this.moisture[i] = 0.1;
+        // Sun exposure: brighter toward the top, with some random shade
+        this.sun[i] = Math.max(0, Math.min(1, 0.2 + (1 - normY) * 0.5 + Math.random() * 0.3));
       }
     }
+    this.initialGrime = 0;
+    for (let i = 0; i < this.size; i++) this.initialGrime += this.grime[i];
   }
 
   step(dt, weather) {
@@ -628,6 +632,13 @@ class FluidGrimeGrid {
       } else if (this.moisture[i] > 0.6) {
         this.hardness[i] = Math.max(0, this.hardness[i] - 0.3 * dt);
       }
+    }
+
+    // Water leaves the surface at the bottom edge
+    const lastRow = (this.gh - 1) * this.gw;
+    for (let x = 0; x < this.gw; x++) {
+      this.water[lastRow + x] *= Math.max(0, 1 - 3 * dt);
+      this.sediment[lastRow + x] *= Math.max(0, 1 - 3 * dt);
     }
 
     // 2. Fluid Runoff & Sediment Transport (Sweeping top-to-bottom / left-to-right)
@@ -666,23 +677,26 @@ class FluidGrimeGrid {
         this.water[i] -= evap;
         if (this.water[i] < 0.05 && this.sediment[i] > 0) {
           const depositRate = 0.5 * (1 - this.foam[i]); // Foam prevents redeposition
-          const deposit = this.sediment[i] * depositRate;
-          this.grime[i] = Math.min(1, this.grime[i] + deposit);
-          this.sediment[i] -= deposit;
+          // Streaks are light and capped so runoff can't undo a cleaned area
+          const room = Math.max(0, 0.3 - this.grime[i]);
+          const deposit = Math.min(this.sediment[i] * depositRate, room);
+          this.grime[i] += deposit;
+          this.sediment[i] = Math.max(0, this.sediment[i] - this.sediment[i] * depositRate);
         }
       }
     }
   }
 
   applySpray(screenX, screenY, sprayRadius, nozzlePower, isSoapOverride) {
-    const startX = Math.max(0, Math.floor((screenX - sprayRadius) / GRID_SCALE));
-    const endX = Math.min(this.gw - 1, Math.floor((screenX + sprayRadius) / GRID_SCALE));
-    const startY = Math.max(0, Math.floor((screenY - sprayRadius) / GRID_SCALE));
-    const endY = Math.min(this.gh - 1, Math.floor((screenY + sprayRadius) / GRID_SCALE));
-
     const lanceBonus = 1 + (UPGRADES[1].level - 1) * 0.20;
     const psiBonus = 1 + (UPGRADES[0].level - 1) * 0.25;
-    const effectiveRadius = (sprayRadius / GRID_SCALE) * lanceBonus;
+    const soapLevel = UPGRADES[2].level;
+    const effectiveRadius = sprayRadius * lanceBonus; // pixels, matches the reticle
+
+    const startX = Math.max(0, Math.floor((screenX - effectiveRadius) / GRID_SCALE));
+    const endX = Math.min(this.gw - 1, Math.floor((screenX + effectiveRadius) / GRID_SCALE));
+    const startY = Math.max(0, Math.floor((screenY - effectiveRadius) / GRID_SCALE));
+    const endY = Math.min(this.gh - 1, Math.floor((screenY + effectiveRadius) / GRID_SCALE));
 
     for (let gy = startY; gy <= endY; gy++) {
       for (let gx = startX; gx <= endX; gx++) {
@@ -698,9 +712,12 @@ class FluidGrimeGrid {
 
           if (isSoapOverride) {
             this.foam[i] = Math.min(1, this.foam[i] + falloff * 0.8);
+            // Surfactant softens baked-on grime (stronger with the chem injector)
+            this.hardness[i] = Math.max(0, this.hardness[i] - falloff * 0.05 * soapLevel);
           } else {
             // Erosion calculation
-            const soakFactor = (this.foam[i] > 0.5 || this.moisture[i] > 0.8) ? 1.6 : 1.0;
+            const foamBoost = this.foam[i] > 0.5 ? 1.6 + (soapLevel - 1) * 0.3 : 1.0;
+            const soakFactor = foamBoost * (this.moisture[i] > 0.8 ? 1.1 : 1.0);
             const effectivePSI = nozzlePower * psiBonus * soakFactor;
             const resistance = this.hardness[i] * 0.6 + this.roughness[i] * 0.4;
 
@@ -729,7 +746,7 @@ class FluidGrimeGrid {
         // Render Grime layer
         if (this.grime[i] > 0.05) {
           // Tint based on material/moisture (greenish algae when wet, brown soot when dry)
-          const isGreen = this.moisture[i] > 0.5 && Math.random() > 0.4;
+          const isGreen = this.moisture[i] > 0.5 && (((gx * 73856093) ^ (gy * 19349663)) >>> 0) % 10 > 3;
           dirtCtx.fillStyle = isGreen ? `rgba(34, 65, 20, ${this.grime[i] * 0.85})` : `rgba(55, 45, 32, ${this.grime[i] * 0.9})`;
           dirtCtx.fillRect(px, py, GRID_SCALE, GRID_SCALE);
         }
@@ -1300,14 +1317,13 @@ function measureCleanliness() {
   for (let i = 0; i < fluidGrid.size; i++) {
     totalGrime += fluidGrid.grime[i];
   }
-  const maxInitialGrime = fluidGrid.size * 0.9;
-  const pct = Math.max(0, Math.min(100, (1 - totalGrime / maxInitialGrime) * 100));
+  const pct = Math.max(0, Math.min(100, (1 - totalGrime / fluidGrid.initialGrime) * 100));
   state.pctClean = pct;
 
   document.getElementById('ui-progress').style.width = `${pct}%`;
   document.getElementById('ui-pct').textContent = `${pct.toFixed(1)}%`;
 
-  if (pct >= 98.2 && !state.stageFinished) {
+  if (pct >= 92 && !state.stageFinished) {
     completeCurrentStage();
   }
 }
@@ -1320,18 +1336,21 @@ function completeCurrentStage() {
 
   const proj = PROJECTS[state.projectIdx];
   const stage = proj.stages[state.stageIdx];
+  const firstClear = !stage.completed;
   stage.completed = true;
-  state.cash += stage.reward;
+  if (firstClear) state.cash += stage.reward;
   sound.playChime();
   updateHUD();
 
   const hasNextStage = state.stageIdx + 1 < proj.stages.length;
   showToast(hasNextStage
-    ? `✅ ${stage.name.replace(/^Stage \d+:\s*/, '')} Complete! +$${stage.reward} — Advancing...`
-    : `🏆 Entire Contract Complete! +$${stage.reward} Final Payout!`
+    ? `✅ ${stage.name.replace(/^Stage \d+:\s*/, '')} Complete! ${firstClear ? ` +$${stage.reward}` : ''} — Advancing...`
+    : `🏆 Entire Contract Complete!${firstClear ? ` +$${stage.reward} Final Payout!` : ''}`
   );
 
+  const pIdx = state.projectIdx, sIdx = state.stageIdx;
   setTimeout(() => {
+    if (state.projectIdx !== pIdx || state.stageIdx !== sIdx) return; // player already moved on
     if (hasNextStage) {
       loadStage(state.projectIdx, state.stageIdx + 1);
     } else {
@@ -1393,6 +1412,10 @@ function openModal(id) {
   if (id === 'jobs-modal') renderJobsModal();
   if (id === 'shop-modal') renderShopModal();
   document.getElementById(id).classList.add('open');
+}
+
+function modalOpen() {
+  return !!document.querySelector('.modal-backdrop.open');
 }
 
 function closeModals() {
@@ -1461,13 +1484,7 @@ function buyUpgrade(idx) {
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
-  if (state.mode === 'play') {
-    cleanCanvas.width = canvas.width;
-    cleanCanvas.height = canvas.height;
-    const proj = PROJECTS[state.projectIdx];
-    proj.stages[state.stageIdx].drawClean(cleanCtx, canvas.width, canvas.height);
-    fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, proj.stages[state.stageIdx].dirtType.startsWith('facade'));
-  }
+  if (state.mode === 'play') loadStage(state.projectIdx, state.stageIdx);
 }
 window.addEventListener('resize', resize);
 
@@ -1476,7 +1493,7 @@ canvas.addEventListener('mousemove', e => {
   state.mouse.y = e.clientY;
 });
 canvas.addEventListener('mousedown', e => {
-  if (e.button === 0 && state.mode === 'play') {
+  if (e.button === 0 && state.mode === 'play' && !modalOpen()) {
     state.mouse.down = true;
     sound.setSpray(true, NOZZLES[state.nozzleIdx]);
   }
@@ -1486,12 +1503,12 @@ window.addEventListener('mouseup', () => {
   sound.setSpray(false);
 });
 window.addEventListener('wheel', e => {
-  if (state.mode !== 'play') return;
+  if (state.mode !== 'play' || modalOpen()) return;
   const dir = e.deltaY > 0 ? 1 : -1;
   selectNozzle((state.nozzleIdx + dir + NOZZLES.length) % NOZZLES.length);
 });
 window.addEventListener('keydown', e => {
-  if (e.key >= '1' && e.key <= '5') selectNozzle(parseInt(e.key) - 1);
+  if (e.key >= '1' && e.key <= '5' && !modalOpen()) selectNozzle(parseInt(e.key) - 1);
   if (e.key === 'Tab' || e.key.toLowerCase() === 'h') {
     e.preventDefault();
     triggerDirtScan();
@@ -1514,7 +1531,7 @@ function loop(now) {
     updateWeather(dt);
 
     if (fluidGrid) {
-      if (state.mouse.down) {
+      if (state.mouse.down && !modalOpen()) {
         const nozzle = NOZZLES[state.nozzleIdx];
         fluidGrid.applySpray(state.mouse.x, state.mouse.y, nozzle.radius, nozzle.power, nozzle.isSoap);
         spawnSprayParticles(state.mouse.x, state.mouse.y, nozzle);
