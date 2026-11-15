@@ -134,6 +134,7 @@
     cursor: none;
   }
   canvas {
+    touch-action: none;
     display: block;
     width: 100%;
     height: 100%;
@@ -272,7 +273,18 @@
 <body>
 
 <!-- Cutscene Overlay -->
-<div id="cutscene-ui">
+<div class="modal-backdrop open" id="start-menu" style="background:#090d13;">
+  <div class="modal" style="text-align:center;max-width:480px;">
+    <h2 style="font-size:32px;">💦 HydroBlast 2D</h2>
+    <p class="sub">Commercial pressure-washing sim. Clean every stage, collect the contract payout, and upgrade your rig.<br>Mouse or touch: hold to spray. Keys 1-5 or scroll to change nozzles.</p>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <button class="primary" id="btn-continue" style="display:none;padding:14px;font-size:16px;" onclick="startGame(true)">▶ Continue</button>
+      <button class="primary" style="padding:14px;font-size:16px;" onclick="startGame(false)">🆕 New Game</button>
+    </div>
+  </div>
+</div>
+
+<div id="cutscene-ui" class="hidden">
   <div class="cutscene-banner" id="cutscene-text">Arriving at Job Site — Commercial Rig Deploying...</div>
   <button id="skip-btn" onclick="skipCutscene()">Skip Arrival ⏭</button>
 </div>
@@ -443,6 +455,52 @@ class SoundEngine {
 }
 const sound = new SoundEngine();
 
+// ================= SAVE / LOAD =================
+const SAVE_KEY = 'hydroblast2d.save.v1';
+
+function saveGame() {
+  try {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      cash: state.cash,
+      projectIdx: state.projectIdx,
+      stageIdx: state.stageIdx,
+      upgrades: UPGRADES.map(u => u.level),
+      completed: PROJECTS.map(p => p.stages.map(st => !!st.completed))
+    }));
+  } catch (e) { /* storage unavailable */ }
+}
+
+function readSave() {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+
+function applySave(d) {
+  if (!d) return;
+  state.cash = +d.cash || 0;
+  state.projectIdx = PROJECTS[d.projectIdx] ? d.projectIdx : 0;
+  state.stageIdx = PROJECTS[state.projectIdx].stages[d.stageIdx] ? d.stageIdx : 0;
+  (d.upgrades || []).forEach((lv, i) => { if (UPGRADES[i]) UPGRADES[i].level = Math.max(1, Math.min(UPGRADES[i].max, lv | 0)); });
+  (d.completed || []).forEach((row, pi) => (row || []).forEach((c, si) => { if (PROJECTS[pi] && PROJECTS[pi].stages[si]) PROJECTS[pi].stages[si].completed = !!c; }));
+}
+
+function startGame(resume) {
+  document.getElementById('start-menu').classList.remove('open');
+  sound.init();
+  if (resume) {
+    applySave(readSave());
+    state.mode = 'cutscene';
+    finishCutscene();
+  } else {
+    try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
+    state.mode = 'cutscene';
+    state.cutsceneTime = 0;
+    document.getElementById('cutscene-ui').classList.remove('hidden');
+  }
+}
+
 function toggleAudio() {
   sound.enabled = !sound.enabled;
   if (!sound.enabled && sound.gainNode) { sound.gainNode.gain.value = 0; sound.isSpraying = false; }
@@ -537,7 +595,7 @@ const UPGRADES = [
 
 // ================= STATE =================
 let state = {
-  mode: 'cutscene', // 'cutscene' | 'play'
+  mode: 'menu', // 'menu' | 'cutscene' | 'play'
   cutsceneTime: 0,
   cash: 350,
   projectIdx: 0,
@@ -1341,6 +1399,7 @@ function completeCurrentStage() {
   if (firstClear) state.cash += stage.reward;
   sound.playChime();
   updateHUD();
+  saveGame();
 
   const hasNextStage = state.stageIdx + 1 < proj.stages.length;
   showToast(hasNextStage
@@ -1353,6 +1412,7 @@ function completeCurrentStage() {
     if (state.projectIdx !== pIdx || state.stageIdx !== sIdx) return; // player already moved on
     if (hasNextStage) {
       loadStage(state.projectIdx, state.stageIdx + 1);
+      saveGame();
     } else {
       openModal('jobs-modal');
     }
@@ -1447,6 +1507,7 @@ function renderJobsModal() {
 function startProjectStage(pIdx, sIdx) {
   closeModals();
   loadStage(pIdx, sIdx);
+  saveGame();
 }
 
 function renderShopModal() {
@@ -1474,6 +1535,7 @@ function buyUpgrade(idx) {
   if (u.level < u.max && state.cash >= cost) {
     state.cash -= cost;
     u.level++;
+    saveGame();
     sound.playChime();
     updateHUD();
     renderShopModal();
@@ -1488,20 +1550,25 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 
-canvas.addEventListener('mousemove', e => {
+canvas.addEventListener('pointermove', e => {
   state.mouse.x = e.clientX;
   state.mouse.y = e.clientY;
 });
-canvas.addEventListener('mousedown', e => {
+canvas.addEventListener('pointerdown', e => {
+  state.mouse.x = e.clientX;
+  state.mouse.y = e.clientY;
   if (e.button === 0 && state.mode === 'play' && !modalOpen()) {
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
     state.mouse.down = true;
     sound.setSpray(true, NOZZLES[state.nozzleIdx]);
   }
 });
-window.addEventListener('mouseup', () => {
+function endSpray() {
   state.mouse.down = false;
   sound.setSpray(false);
-});
+}
+window.addEventListener('pointerup', endSpray);
+window.addEventListener('pointercancel', endSpray);
 window.addEventListener('wheel', e => {
   if (state.mode !== 'play' || modalOpen()) return;
   const dir = e.deltaY > 0 ? 1 : -1;
@@ -1525,7 +1592,10 @@ function loop(now) {
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  if (state.mode === 'cutscene') {
+  if (state.mode === 'menu') {
+    ctx.fillStyle = '#090d13';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  } else if (state.mode === 'cutscene') {
     drawCutscene(dt);
   } else {
     updateWeather(dt);
@@ -1649,6 +1719,7 @@ function loop(now) {
 // Init
 resize();
 buildNozzleDock();
+if (readSave()) document.getElementById('btn-continue').style.display = 'block';
 requestAnimationFrame(loop);
 </script>
 </body>
