@@ -41,9 +41,11 @@
     display: flex;
     align-items: center;
     gap: 16px;
-    pointer-events: auto;
+    pointer-events: none; /* sprays pass through panel backgrounds; buttons stay clickable */
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
   }
+  .panel button, #weather-hud button { pointer-events: auto; }
+  #hud-bottom { pointer-events: none; }
 
   .job-title { font-weight: 800; font-size: 16px; color: #38bdf8; letter-spacing: 0.015em; }
   .stage-badge {
@@ -92,6 +94,7 @@
     width: 280px;
     transition: opacity 0.4s;
     box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+    pointer-events: none;
   }
   #stage-hud.hidden { opacity: 0; pointer-events: none; }
   #stage-hud h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 8px; font-weight: 800; }
@@ -121,6 +124,7 @@
     width: 240px;
     transition: opacity 0.4s;
     box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+    pointer-events: none;
   }
   #weather-hud.hidden { opacity: 0; pointer-events: none; }
   .weather-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: #cbd5e1; }
@@ -326,6 +330,7 @@
   <div class="weather-row"><span>Rain Rate:</span><span class="weather-val" id="wh-rain">0.0 in/hr</span></div>
   <div class="weather-row"><span>Air Temp:</span><span class="weather-val" id="wh-temp">30°C</span></div>
   <div class="weather-row"><span>Sim Particles:</span><span class="weather-val" id="wh-particles">0</span></div>
+  <button id="weather-btn" onclick="nextWeather()" style="margin-top:8px;width:100%;" title="Cycle weather manually (shortcut: W)">🌦 Next Weather (W)</button>
 </div>
 
 <div id="toast">Stage Complete!</div>
@@ -608,7 +613,8 @@ let state = {
   stageFinished: false,
   scanPulse: 0,
   mouse: { x: 400, y: 300, down: false },
-  particles: []
+  particles: [],
+  rain: []
 };
 
 const canvas = document.getElementById('canvas');
@@ -624,9 +630,29 @@ const soapCtx = soapCanvas.getContext('2d');
 // Low-Resolution Fluid & Grime Simulation Grid
 let fluidGrid = null;
 const GRID_SCALE = 5; // Pixels per grid cell
+const GROWTH_SCALE = 0.3;   // overall grime regrowth speed
+const CLEAN_GRACE = 6;      // seconds a freshly cleaned cell stays clear of regrowth
+
+// Surface materials, indexed by Grid.material[]
+const MATERIALS = {
+  STONE: { id: 0, name: 'brick/stone/concrete', roughness: 0.80, adhesion: 1.0,  hardMul: 1.0, streakCap: 0.30 },
+  GLASS: { id: 1, name: 'glass',                roughness: 0.25, adhesion: 0.35, hardMul: 0.6, streakCap: 0.45 },
+  TRIM:  { id: 2, name: 'metal/painted trim',   roughness: 0.30, adhesion: 0.5,  hardMul: 0.8, streakCap: 0.40 }
+};
+const MATERIAL_LIST = [MATERIALS.STONE, MATERIALS.GLASS, MATERIALS.TRIM];
+
+// Infer the material from the clean artwork colour so physics follows the picture.
+function classifyMaterial(r, g, b, isFacade) {
+  if (!isFacade) return MATERIALS.STONE; // walkways and plazas are concrete / flagstone
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  const sat = mx ? (mx - mn) / mx : 0;
+  if (sat > 0.5 && b >= r + 20) return MATERIALS.GLASS;      // blue / teal glass and sky
+  if (mn > 185 && sat < 0.12) return MATERIALS.TRIM;         // limestone, white frames, clock face
+  return MATERIALS.STONE;                                    // brick
+}
 
 class FluidGrimeGrid {
-  constructor(w, h, isVertical) {
+  constructor(w, h, isVertical, srcCtx) {
     this.gw = Math.ceil(w / GRID_SCALE);
     this.gh = Math.ceil(h / GRID_SCALE);
     this.size = this.gw * this.gh;
@@ -642,21 +668,36 @@ class FluidGrimeGrid {
     this.foam = new Float32Array(this.size);      // Soap foam coverage
     this.roughness = new Float32Array(this.size); // Material roughness
     this.sun = new Float32Array(this.size);       // Sun exposure
+    this.material = new Uint8Array(this.size);    // MATERIALS id
+    this.adhesion = new Float32Array(this.size);  // How strongly grime clings / grows
+    this.streakCap = new Float32Array(this.size); // Max grime that runoff can redeposit
+    this.cooldown = new Float32Array(this.size);  // Post-clean regrowth grace (seconds)
 
-    this.initMaterialMap();
+    this.initMaterialMap(srcCtx, w, h);
   }
 
-  initMaterialMap() {
+  initMaterialMap(srcCtx, w, h) {
+    let img = null;
+    try { if (srcCtx) img = srcCtx.getImageData(0, 0, w, h).data; } catch (e) { img = null; }
     for (let y = 0; y < this.gh; y++) {
       for (let x = 0; x < this.gw; x++) {
         const i = y * this.gw + x;
         const normY = y / this.gh;
-        // Roughness: Brick/Concrete = high (0.8), Glass/Metal = low (0.3)
-        this.roughness[i] = 0.75 - normY * 0.2 + Math.random() * 0.1;
+        // Material comes from the artwork under this cell
+        let mat = MATERIALS.STONE;
+        if (img) {
+          const px = Math.min(w - 1, x * GRID_SCALE + 2), py = Math.min(h - 1, y * GRID_SCALE + 2);
+          const o = (py * w + px) * 4;
+          mat = classifyMaterial(img[o], img[o + 1], img[o + 2], this.isVertical);
+        }
+        this.material[i] = mat.id;
+        this.roughness[i] = mat.roughness + (Math.random() - 0.5) * 0.06;
+        this.adhesion[i] = mat.adhesion;
+        this.streakCap[i] = mat.streakCap;
 
         // Base Grime & Hardness initialization
         this.grime[i] = 0.85 + Math.random() * 0.15;
-        this.hardness[i] = 0.5 + Math.random() * 0.3;
+        this.hardness[i] = (0.5 + Math.random() * 0.3) * mat.hardMul;
         this.moisture[i] = 0.1;
         // Sun exposure: brighter toward the top, with some random shade
         this.sun[i] = Math.max(0, Math.min(1, 0.2 + (1 - normY) * 0.5 + Math.random() * 0.3));
@@ -680,9 +721,14 @@ class FluidGrimeGrid {
       }
 
       // Organic algae growth in humid/shaded areas + dry dust settling
-      const algaeGrowth = 0.018 * (humidity * humidity) * (1 - this.sun[i]) * this.moisture[i];
-      const dustGrowth = 0.009 * (1 - humidity) * this.roughness[i];
-      this.grime[i] = Math.min(1, this.grime[i] + (algaeGrowth + dustGrowth) * (1 - this.grime[i]) * dt);
+      if (this.cooldown[i] > 0) {
+        this.cooldown[i] -= dt;
+      } else {
+        // Organic algae clings to rough, porous stone; smooth glass resists it
+        const algaeGrowth = 0.018 * (humidity * humidity) * (1 - this.sun[i]) * this.moisture[i] * this.adhesion[i];
+        const dustGrowth = 0.009 * (1 - humidity) * this.roughness[i];
+        this.grime[i] = Math.min(1, this.grime[i] + (algaeGrowth + dustGrowth) * GROWTH_SCALE * (1 - this.grime[i]) * dt);
+      }
 
       // Baking vs Softening
       if (this.moisture[i] < 0.2 && temp > 25) {
@@ -736,7 +782,7 @@ class FluidGrimeGrid {
         if (this.water[i] < 0.05 && this.sediment[i] > 0) {
           const depositRate = 0.5 * (1 - this.foam[i]); // Foam prevents redeposition
           // Streaks are light and capped so runoff can't undo a cleaned area
-          const room = Math.max(0, 0.3 - this.grime[i]);
+          const room = Math.max(0, this.streakCap[i] - this.grime[i]);
           const deposit = Math.min(this.sediment[i] * depositRate, room);
           this.grime[i] += deposit;
           this.sediment[i] = Math.max(0, this.sediment[i] - this.sediment[i] * depositRate);
@@ -783,12 +829,40 @@ class FluidGrimeGrid {
               const removeAmount = (effectivePSI - resistance * 0.4) * falloff * 0.35;
               const detached = Math.min(this.grime[i], removeAmount);
               this.grime[i] -= detached;
+              if (this.grime[i] < 0.05) this.cooldown[i] = CLEAN_GRACE;
               this.sediment[i] += detached * 0.9; // Suspended in water
             }
           }
         }
       }
     }
+  }
+
+  // Tactical scan: dim the scene and light every remaining dirty cell amber
+  renderScan(c, a) {
+    c.save();
+    c.fillStyle = `rgba(0, 0, 0, ${0.5 * a})`;
+    c.fillRect(0, 0, c.canvas.width, c.canvas.height);
+    let dirty = 0;
+    for (let i = 0; i < this.size; i++) if (this.grime[i] > 0.05) dirty++;
+    const pad = dirty < 600 ? 4 : 0; // enlarge lone micro-spots so they pop
+    c.fillStyle = '#ffb000';
+    for (let gy = 0; gy < this.gh; gy++) {
+      for (let gx = 0; gx < this.gw; gx++) {
+        const g = this.grime[gy * this.gw + gx];
+        if (g > 0.05) {
+          c.globalAlpha = Math.min(1, 0.6 + g * 0.5) * a;
+          c.fillRect(gx * GRID_SCALE - pad, gy * GRID_SCALE - pad, GRID_SCALE + pad * 2, GRID_SCALE + pad * 2);
+        }
+      }
+    }
+    c.restore();
+  }
+
+  dirtyCount() {
+    let n = 0;
+    for (let i = 0; i < this.size; i++) if (this.grime[i] > 0.05) n++;
+    return n;
   }
 
   renderToCanvases() {
@@ -817,10 +891,15 @@ class FluidGrimeGrid {
 
         // Render Runoff Streaks (Visual wetness + sediment)
         const wDepth = this.water[i];
-        if (wDepth > 0.1) {
-          const sedRatio = this.sediment[i] / (wDepth + 1e-6);
-          const alpha = Math.min(0.7, wDepth * 0.3);
-          soapCtx.fillStyle = sedRatio > 0.3 ? `rgba(92, 68, 42, ${alpha})` : `rgba(186, 230, 253, ${alpha})`;
+        const sed = this.sediment[i];
+        if (wDepth > 0.1 || sed > 0.03) {
+          const sedRatio = sed / (wDepth + 1e-6);
+          const mix = Math.min(1, sedRatio * 6 + sed * 2);           // 0 = clear water, 1 = muddy
+          const rr = Math.round(186 + (96 - 186) * mix);
+          const gg = Math.round(230 + (66 - 230) * mix);
+          const bb = Math.round(253 + (30 - 253) * mix);
+          const alpha = Math.min(0.9, wDepth * 0.3 + sed * 3.5);
+          soapCtx.fillStyle = `rgba(${rr}, ${gg}, ${bb}, ${alpha})`;
           soapCtx.fillRect(px, py, GRID_SCALE, GRID_SCALE);
         }
       }
@@ -1328,25 +1407,73 @@ function loadStage(projectIdx, stageIdx) {
   soapCanvas.height = canvas.height;
 
   stage.drawClean(cleanCtx, canvas.width, canvas.height);
-  fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'));
+  fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'), cleanCtx);
 
   updateHUD();
 }
 
+function setWeather(idx) {
+  const n = WEATHER_STATES.length;
+  state.weatherIdx = ((idx % n) + n) % n;
+  state.weatherTimer = 0;
+  state.currentWeather.name = WEATHER_STATES[state.weatherIdx].name;
+}
+
+function nextWeather() {
+  setWeather(state.weatherIdx + 1);
+}
+
+let weatherHudTimer = 0;
 function updateWeather(dt) {
   state.weatherTimer += dt;
-  if (state.weatherTimer > 45) { // Shift weather every 45 seconds
-    state.weatherTimer = 0;
-    state.weatherIdx = (state.weatherIdx + 1) % WEATHER_STATES.length;
-    state.currentWeather = { ...WEATHER_STATES[state.weatherIdx] };
-  }
+  if (state.weatherTimer > 45) nextWeather(); // auto-cycle every 45 seconds
 
-  // Update weather HUD
-  document.getElementById('weather-state-name').textContent = state.currentWeather.name;
-  document.getElementById('wh-humidity').textContent = `${Math.round(state.currentWeather.humidity * 100)}%`;
-  document.getElementById('wh-rain').textContent = (state.currentWeather.rainRate * 3.5).toFixed(1) + ' in/hr';
-  document.getElementById('wh-temp').textContent = `${state.currentWeather.temp}°C`;
-  document.getElementById('wh-particles').textContent = state.particles.length;
+  // Ease current conditions toward the target state (~2.5s time constant)
+  const tgt = WEATHER_STATES[state.weatherIdx], cur = state.currentWeather;
+  const k = 1 - Math.exp(-dt / 2.5);
+  for (const key of ['humidity', 'rainRate', 'temp', 'windX']) cur[key] += (tgt[key] - cur[key]) * k;
+
+  weatherHudTimer += dt;
+  if (weatherHudTimer > 0.2) {
+    weatherHudTimer = 0;
+    document.getElementById('weather-state-name').textContent = cur.name;
+    document.getElementById('wh-humidity').textContent = `${Math.round(cur.humidity * 100)}%`;
+    document.getElementById('wh-rain').textContent = (cur.rainRate * 3.5).toFixed(1) + ' in/hr';
+    document.getElementById('wh-temp').textContent = `${Math.round(cur.temp)}°C`;
+    document.getElementById('wh-particles').textContent = state.particles.length;
+  }
+}
+
+// Overcast tint + persistent rain drops whose slant follows windX
+function drawWeatherOverlay(dt) {
+  const w = state.currentWeather, W = canvas.width, H = canvas.height;
+  const dark = Math.max(0, w.humidity - 0.25) * 0.18 + w.rainRate * 0.2;
+  if (dark > 0.005) {
+    ctx.fillStyle = `rgba(15, 23, 42, ${dark})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  const drops = state.rain;
+  const target = Math.round(w.rainRate * 600);
+  while (drops.length < target) drops.push({ x: Math.random() * W * 1.4 - W * 0.2, y: Math.random() * H, v: 0.8 + Math.random() * 0.5 });
+  if (drops.length > target) drops.length = target;
+  if (!drops.length) return;
+
+  const vx0 = w.windX * 600, vy0 = 900;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(210, 240, 255, 0.4)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (const d of drops) {
+    d.x += vx0 * d.v * dt;
+    d.y += vy0 * d.v * dt;
+    if (d.y > H) { d.y = -20; d.x = Math.random() * W * 1.4 - W * 0.2; }
+    if (d.x < -W * 0.2) d.x += W * 1.4;
+    if (d.x > W * 1.2) d.x -= W * 1.4;
+    ctx.moveTo(d.x, d.y);
+    ctx.lineTo(d.x - vx0 * d.v * 0.035, d.y - vy0 * d.v * 0.035);
+  }
+  ctx.stroke();
+  ctx.restore();
 }
 
 function spawnSprayParticles(x, y, nozzle) {
@@ -1373,7 +1500,8 @@ function measureCleanliness() {
   if (!fluidGrid) return;
   let totalGrime = 0;
   for (let i = 0; i < fluidGrid.size; i++) {
-    totalGrime += fluidGrid.grime[i];
+    const g = fluidGrid.grime[i];
+    if (g > 0.05) totalGrime += g; // below this the layer isn't drawn, so it counts as clean
   }
   const pct = Math.max(0, Math.min(100, (1 - totalGrime / fluidGrid.initialGrime) * 100));
   state.pctClean = pct;
@@ -1381,7 +1509,7 @@ function measureCleanliness() {
   document.getElementById('ui-progress').style.width = `${pct}%`;
   document.getElementById('ui-pct').textContent = `${pct.toFixed(1)}%`;
 
-  if (pct >= 92 && !state.stageFinished) {
+  if (pct >= 98 && !state.stageFinished) {
     completeCurrentStage();
   }
 }
@@ -1420,7 +1548,10 @@ function completeCurrentStage() {
 }
 
 function triggerDirtScan() {
+  if (state.mode !== 'play' || !fluidGrid) return;
   state.scanPulse = 1.0;
+  const n = fluidGrid.dirtyCount();
+  showToast(n ? `🔍 Scan: ${n} dirty cells remaining (${(100 * n / fluidGrid.size).toFixed(1)}% of surface)` : '🔍 Scan: surface is spotless!');
 }
 
 function showToast(msg) {
@@ -1580,6 +1711,7 @@ window.addEventListener('keydown', e => {
     e.preventDefault();
     triggerDirtScan();
   }
+  if (e.key.toLowerCase() === 'w' && state.mode === 'play' && !modalOpen()) nextWeather();
   if (e.key === 'Escape') closeModals();
 });
 
@@ -1622,31 +1754,13 @@ function loop(now) {
     ctx.drawImage(dirtCanvas, 0, 0);
     ctx.drawImage(soapCanvas, 0, 0);
 
-    // Dynamic Rain Overlay during storm conditions
-    if (state.currentWeather.rainRate > 0) {
-      ctx.save();
-      ctx.strokeStyle = 'rgba(210, 240, 255, 0.35)';
-      ctx.lineWidth = 1.5;
-      for (let r = 0; r < 400; r++) {
-        const rx = Math.random() * canvas.width;
-        const ry = Math.random() * canvas.height;
-        ctx.beginPath();
-        ctx.moveTo(rx, ry);
-        ctx.lineTo(rx - state.currentWeather.windX * 25, ry + 35);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
+    // Overcast tint and rain
+    drawWeatherOverlay(dt);
 
-    // Dirt Scan Radar Pulse Overlay
+    // Dirt Scan: dims the scene and lights every remaining dirty cell amber
     if (state.scanPulse > 0) {
-      state.scanPulse = Math.max(0, state.scanPulse - dt * 0.65);
-      ctx.save();
-      ctx.globalAlpha = Math.sin(state.scanPulse * Math.PI) * 0.7;
-      ctx.globalCompositeOperation = 'source-atop';
-      ctx.fillStyle = '#f97316';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.restore();
+      state.scanPulse = Math.max(0, state.scanPulse - dt * 0.5);
+      if (fluidGrid) fluidGrid.renderScan(ctx, Math.min(1, state.scanPulse * 3));
     }
 
     // Ground-Level Operator & High-Reach Hose Line at Bottom of Screen
