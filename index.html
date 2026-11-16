@@ -209,6 +209,12 @@
     font-size: 14px;
   }
 
+  @media (max-width: 600px) {
+    #cutscene-ui { padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); }
+    .cutscene-banner { font-size: 12px; padding: 10px 16px; border-radius: 16px; letter-spacing: 0.02em; max-width: 100%; }
+    #skip-btn { padding: 10px 16px; font-size: 13px; }
+  }
+
   /* Modals */
   .modal-backdrop {
     position: fixed;
@@ -405,6 +411,17 @@ class SoundEngine {
     this.gainNode.connect(this.ctx.destination);
     noise.start();
   }
+  // Create / resume the context from inside a user gesture (required by mobile browsers)
+  unlock() {
+    if (!this.ctx) this.init();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    try { // iOS: a silent one-sample buffer fully unlocks output
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.ctx.createBuffer(1, 1, 22050);
+      src.connect(this.ctx.destination);
+      src.start(0);
+    } catch (e) {}
+  }
   setSpray(active, nozzle) {
     if (!this.enabled) return;
     if (!this.ctx) this.init();
@@ -443,6 +460,7 @@ class SoundEngine {
   playChime() {
     if (!this.enabled) return;
     if (!this.ctx) this.init();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
     const now = this.ctx.currentTime;
     [523.25, 659.25, 783.99, 1046.5].forEach((freq, idx) => {
       const osc = this.ctx.createOscillator();
@@ -463,23 +481,41 @@ const sound = new SoundEngine();
 // ================= SAVE / LOAD =================
 const SAVE_KEY = 'hydroblast2d.save.v1';
 
-function saveGame() {
+function saveGame(over = {}) {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify({
       cash: state.cash,
-      projectIdx: state.projectIdx,
-      stageIdx: state.stageIdx,
+      projectIdx: over.projectIdx ?? state.projectIdx,
+      stageIdx: over.stageIdx ?? state.stageIdx,
       upgrades: UPGRADES.map(u => u.level),
       completed: PROJECTS.map(p => p.stages.map(st => !!st.completed))
     }));
   } catch (e) { /* storage unavailable */ }
 }
 
+function validSave(d) {
+  return !!(d && typeof d === 'object' &&
+    Number.isFinite(d.cash) && d.cash >= 0 &&
+    Array.isArray(d.upgrades) && Array.isArray(d.completed) &&
+    Number.isInteger(d.projectIdx) && Number.isInteger(d.stageIdx) &&
+    PROJECTS[d.projectIdx] && PROJECTS[d.projectIdx].stages[d.stageIdx]);
+}
+
 function readSave() {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    const d = raw ? JSON.parse(raw) : null;
+    return validSave(d) ? d : null;
   } catch (e) { return null; }
+}
+
+// After loading, land on the first stage of the contract that isn't cleared yet
+function resumePoint() {
+  const proj = PROJECTS[state.projectIdx];
+  if (!proj.stages[state.stageIdx].completed) return true;
+  const next = proj.stages.findIndex(st => !st.completed);
+  if (next >= 0) { state.stageIdx = next; return true; }
+  return false; // contract already finished
 }
 
 function applySave(d) {
@@ -493,12 +529,15 @@ function applySave(d) {
 
 function startGame(resume) {
   document.getElementById('start-menu').classList.remove('open');
-  sound.init();
+  sound.unlock();
   if (resume) {
     applySave(readSave());
+    const open = resumePoint();
     state.mode = 'cutscene';
     finishCutscene();
+    if (!open) openModal('jobs-modal');
   } else {
+    state.hornPlayed = false;
     try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
     state.mode = 'cutscene';
     state.cutsceneTime = 0;
@@ -559,6 +598,7 @@ const PROJECTS = [
         desc: 'Reach all the way to the top cornice. Pre-soak with foam to prevent upper runoff streaking.',
         reward: 500,
         dirtType: 'facade_upper',
+        skyFrac: 0.18, // top 18% of the screen is open sky above the roofline
         drawClean: drawUpperFacadeClean,
         completed: false
       }
@@ -585,6 +625,7 @@ const PROJECTS = [
         desc: 'Blast years of atmospheric soot and bird staining off the main clock face tower.',
         reward: 500,
         dirtType: 'facade_upper',
+        skyFrac: 0.18, // top 18% of the screen is open sky above the roofline
         drawClean: drawClocktowerClean,
         completed: false
       }
@@ -636,10 +677,12 @@ const CLEAN_GRACE = 6;      // seconds a freshly cleaned cell stays clear of reg
 // Surface materials, indexed by Grid.material[]
 const MATERIALS = {
   STONE: { id: 0, name: 'brick/stone/concrete', roughness: 0.80, adhesion: 1.0,  hardMul: 1.0, streakCap: 0.30 },
+  AIR:   { id: 3, name: 'open sky',             roughness: 0.50, adhesion: 0.0,  hardMul: 0.0, streakCap: 0.0 },
   GLASS: { id: 1, name: 'glass',                roughness: 0.25, adhesion: 0.35, hardMul: 0.6, streakCap: 0.45 },
   TRIM:  { id: 2, name: 'metal/painted trim',   roughness: 0.30, adhesion: 0.5,  hardMul: 0.8, streakCap: 0.40 }
 };
-const MATERIAL_LIST = [MATERIALS.STONE, MATERIALS.GLASS, MATERIALS.TRIM];
+const MATERIAL_LIST = [MATERIALS.STONE, MATERIALS.GLASS, MATERIALS.TRIM, MATERIALS.AIR];
+const AIR_ID = MATERIALS.AIR.id;  // sky cells never hold grime, water or foam and don't count for completion
 
 // Infer the material from the clean artwork colour so physics follows the picture.
 function classifyMaterial(r, g, b, isFacade) {
@@ -652,7 +695,7 @@ function classifyMaterial(r, g, b, isFacade) {
 }
 
 class FluidGrimeGrid {
-  constructor(w, h, isVertical, srcCtx) {
+  constructor(w, h, isVertical, srcCtx, skyFrac = 0) {
     this.gw = Math.ceil(w / GRID_SCALE);
     this.gh = Math.ceil(h / GRID_SCALE);
     this.size = this.gw * this.gh;
@@ -673,10 +716,11 @@ class FluidGrimeGrid {
     this.streakCap = new Float32Array(this.size); // Max grime that runoff can redeposit
     this.cooldown = new Float32Array(this.size);  // Post-clean regrowth grace (seconds)
 
-    this.initMaterialMap(srcCtx, w, h);
+    this.initMaterialMap(srcCtx, w, h, skyFrac);
   }
 
-  initMaterialMap(srcCtx, w, h) {
+  initMaterialMap(srcCtx, w, h, skyFrac) {
+    const skyRows = Math.floor((skyFrac * h) / GRID_SCALE);
     let img = null;
     try { if (srcCtx) img = srcCtx.getImageData(0, 0, w, h).data; } catch (e) { img = null; }
     for (let y = 0; y < this.gh; y++) {
@@ -690,15 +734,17 @@ class FluidGrimeGrid {
           const o = (py * w + px) * 4;
           mat = classifyMaterial(img[o], img[o + 1], img[o + 2], this.isVertical);
         }
+        if (y < skyRows) mat = MATERIALS.AIR;
         this.material[i] = mat.id;
         this.roughness[i] = mat.roughness + (Math.random() - 0.5) * 0.06;
         this.adhesion[i] = mat.adhesion;
         this.streakCap[i] = mat.streakCap;
 
         // Base Grime & Hardness initialization
-        this.grime[i] = 0.85 + Math.random() * 0.15;
-        this.hardness[i] = (0.5 + Math.random() * 0.3) * mat.hardMul;
-        this.moisture[i] = 0.1;
+        const isAir = mat.id === AIR_ID;
+        this.grime[i] = isAir ? 0 : 0.85 + Math.random() * 0.15;
+        this.hardness[i] = isAir ? 0 : (0.5 + Math.random() * 0.3) * mat.hardMul;
+        this.moisture[i] = isAir ? 0 : 0.1;
         // Sun exposure: brighter toward the top, with some random shade
         this.sun[i] = Math.max(0, Math.min(1, 0.2 + (1 - normY) * 0.5 + Math.random() * 0.3));
       }
@@ -712,9 +758,11 @@ class FluidGrimeGrid {
     const evapRate = 0.035 * (1.1 - humidity) * (temp / 25);
     const gx = windX * 14;
     const gy = this.isVertical ? 180 : 25; // High gravity for vertical facades
+    const soapLevel = UPGRADES[2].level;
 
     // 1. Weather Accumulation & Grime Growth/Baking
     for (let i = 0; i < this.size; i++) {
+      if (this.material[i] === AIR_ID) continue; // sky: nothing to grow, soak or soften
       if (rainRate > 0) {
         this.water[i] += rainRate * 0.35 * dt;
         this.moisture[i] = Math.min(1, this.moisture[i] + rainRate * 2 * dt);
@@ -728,6 +776,16 @@ class FluidGrimeGrid {
         const algaeGrowth = 0.018 * (humidity * humidity) * (1 - this.sun[i]) * this.moisture[i] * this.adhesion[i];
         const dustGrowth = 0.009 * (1 - humidity) * this.roughness[i];
         this.grime[i] = Math.min(1, this.grime[i] + (algaeGrowth + dustGrowth) * GROWTH_SCALE * (1 - this.grime[i]) * dt);
+      }
+
+      // Surfactant foam slowly dissolves grime (faster with the chem injector), then fades / rains off
+      if (this.foam[i] > 0.05) {
+        if (this.grime[i] > 0) {
+          const d = Math.min(this.grime[i], 0.02 * soapLevel * this.foam[i] * (1 - this.hardness[i] * 0.5) * dt);
+          this.grime[i] -= d;
+          if (this.grime[i] < 0.05) this.cooldown[i] = CLEAN_GRACE;
+        }
+        this.foam[i] = Math.max(0, this.foam[i] - (0.01 + rainRate * 0.15) * dt);
       }
 
       // Baking vs Softening
@@ -805,6 +863,7 @@ class FluidGrimeGrid {
     for (let gy = startY; gy <= endY; gy++) {
       for (let gx = startX; gx <= endX; gx++) {
         const i = gy * this.gw + gx;
+        if (this.material[i] === AIR_ID) continue; // spray passes through open sky
         const cx = gx * GRID_SCALE + GRID_SCALE/2;
         const cy = gy * GRID_SCALE + GRID_SCALE/2;
         const dist = Math.hypot(screenX - cx, screenY - cy);
@@ -832,6 +891,7 @@ class FluidGrimeGrid {
               if (this.grime[i] < 0.05) this.cooldown[i] = CLEAN_GRACE;
               this.sediment[i] += detached * 0.9; // Suspended in water
             }
+            this.foam[i] = Math.max(0, this.foam[i] - falloff * 0.15); // clear-water rinse strips foam
           }
         }
       }
@@ -931,9 +991,10 @@ function drawCutscene(dt) {
   }
 
   // 3-Story Commercial Office Building on Right Side
-  const bldgW = Math.min(460, w * 0.45);
+  const sc = Math.max(0.4, Math.min(1, w / 860, h / 520)); // rig scale for narrow / short screens
+  const bldgW = Math.min(460, w * (w < 600 ? 0.4 : 0.45));
   const bldgH = Math.min(480, h * 0.65);
-  const bldgX = w - bldgW - 60;
+  const bldgX = w - bldgW - Math.min(60, w * 0.04);
   const bldgY = h * 0.72 - bldgH;
 
   ctx.fillStyle = '#5d2e21';
@@ -943,15 +1004,18 @@ function drawCutscene(dt) {
   ctx.fillStyle = '#334155';
   ctx.fillRect(bldgX - 10, bldgY - 16, bldgW + 20, 20);
 
-  // 3 Stories of Windows
+  // 3 Stories of Windows (sized from the building so they never overlap on narrow screens)
+  const winMargin = bldgW * 0.07;
+  const colW = (bldgW - winMargin * 2) / 4;
+  const winW = colW * 0.7, winH = winW * 1.35;
   for (let floor = 0; floor < 3; floor++) {
     const wy = bldgY + 36 + floor * (bldgH / 3.1);
     for (let col = 0; col < 4; col++) {
-      const wx = bldgX + 32 + col * ((bldgW - 64) / 3.3);
+      const wx = bldgX + winMargin + col * colW + (colW - winW) / 2;
       ctx.fillStyle = '#0f172a';
-      ctx.fillRect(wx, wy, 52, 70);
+      ctx.fillRect(wx, wy, winW, winH);
       ctx.fillStyle = 'rgba(56, 189, 248, 0.2)';
-      ctx.fillRect(wx + 4, wy + 4, 44, 62);
+      ctx.fillRect(wx + 3, wy + 3, winW - 6, winH - 6);
     }
   }
 
@@ -972,14 +1036,16 @@ function drawCutscene(dt) {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // RAM Truck & Trailer Animation Timing
-  const targetTruckX = Math.max(280, bldgX - 220);
+  // RAM Truck & Trailer Animation Timing (rig scales to fit the screen)
+  const rigLeft = 340 * sc, rigRight = 176 * sc;
+  const targetTruckX = Math.max(rigLeft + 10, Math.min(w - rigRight - 10, bldgX - 200 * sc));
+  const startTruckX = -rigRight - 20;
   const driveProgress = Math.min(1, t / 2.8);
   const easeOut = 1 - Math.pow(1 - driveProgress, 3);
-  const truckX = -420 + (targetTruckX + 420) * easeOut;
+  const truckX = startTruckX + (targetTruckX - startTruckX) * easeOut;
   const truckY = roadY + 14;
 
-  if (t >= 2.75 && t < 2.82 && !state.hornPlayed) {
+  if (t >= 2.75 && !state.hornPlayed) { // not a narrow time window: slow frames can't skip the horn
     state.hornPlayed = true;
     sound.playTruckHorn();
   }
@@ -994,20 +1060,28 @@ function drawCutscene(dt) {
     banner.textContent = 'Operator Deployed — Ready for Stage 1: Front Walkway';
   }
 
-  drawRamTruckAndRig(ctx, truckX, truckY, t < 2.8 ? t * 16 : 0, t > 3.0);
+  ctx.save();
+  ctx.translate(truckX, truckY);
+  ctx.scale(sc, sc);
+  drawRamTruckAndRig(ctx, 0, 0, t < 2.8 ? t * 16 : 0, t > 3.0);
+  ctx.restore();
 
-  // Character Hopping Out & Walking toward Walkway
+  // Operator hops out and walks toward the walkway
   if (t > 3.0) {
+    const cs = Math.max(sc, 0.65);
     const hopT = Math.min(1, (t - 3.0) / 0.55);
     const walkT = Math.max(0, Math.min(1, (t - 3.5) / 1.4));
-    const charStartX = truckX - 35;
-    const charEndX = bldgX - 35;
+    const charStartX = truckX + 20 * sc;
+    const charEndX = Math.max(charStartX, bldgX - 35 * cs);
     const charX = charStartX + (charEndX - charStartX) * walkT;
-    const hopArc = Math.sin(hopT * Math.PI) * 20;
-    const walkBob = walkT > 0 && walkT < 1 ? Math.abs(Math.sin(t * 16)) * 6 : 0;
-    const charY = (truckY - 12) - hopArc - walkBob - walkT * 18;
-
-    drawOperatorCharacter(ctx, charX, charY, walkT > 0.8);
+    const hopArc = Math.sin(hopT * Math.PI) * 20 * cs;
+    const walkBob = walkT > 0 && walkT < 1 ? Math.abs(Math.sin(t * 16)) * 6 * cs : 0;
+    const charY = (truckY - 12 * cs) - hopArc - walkBob - walkT * 18 * cs;
+    ctx.save();
+    ctx.translate(charX, charY);
+    ctx.scale(cs, cs);
+    drawOperatorCharacter(ctx, 0, 0, walkT > 0.8);
+    ctx.restore();
   }
 
   if (t >= 5.5) {
@@ -1407,7 +1481,7 @@ function loadStage(projectIdx, stageIdx) {
   soapCanvas.height = canvas.height;
 
   stage.drawClean(cleanCtx, canvas.width, canvas.height);
-  fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'), cleanCtx);
+  fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'), cleanCtx, stage.skyFrac || 0);
 
   updateHUD();
 }
@@ -1527,9 +1601,10 @@ function completeCurrentStage() {
   if (firstClear) state.cash += stage.reward;
   sound.playChime();
   updateHUD();
-  saveGame();
 
   const hasNextStage = state.stageIdx + 1 < proj.stages.length;
+  // Save pointing at the NEXT stage so a reload during the 2.5s transition still resumes correctly
+  saveGame({ stageIdx: hasNextStage ? state.stageIdx + 1 : state.stageIdx });
   showToast(hasNextStage
     ? `✅ ${stage.name.replace(/^Stage \d+:\s*/, '')} Complete! ${firstClear ? ` +$${stage.reward}` : ''} — Advancing...`
     : `🏆 Entire Contract Complete!${firstClear ? ` +$${stage.reward} Final Payout!` : ''}`
@@ -1595,6 +1670,8 @@ function buildNozzleDock() {
 function selectNozzle(idx) {
   state.nozzleIdx = idx;
   buildNozzleDock();
+  // Retune the live spray sound smoothly when swapping nozzles mid-spray
+  if (state.mouse.down && state.mode === 'play') sound.setSpray(true, NOZZLES[idx]);
 }
 
 function openModal(id) {
@@ -1833,6 +1910,16 @@ function loop(now) {
 // Init
 resize();
 buildNozzleDock();
+
+// Unlock Web Audio on the very first tap / click / key, then stop listening once it is running
+const UNLOCK_EVENTS = ['pointerdown', 'touchend', 'keydown', 'click'];
+function unlockAudioOnce() {
+  sound.unlock();
+  if (sound.ctx && sound.ctx.state === 'running') {
+    UNLOCK_EVENTS.forEach(ev => window.removeEventListener(ev, unlockAudioOnce, true));
+  }
+}
+UNLOCK_EVENTS.forEach(ev => window.addEventListener(ev, unlockAudioOnce, true));
 if (readSave()) document.getElementById('btn-continue').style.display = 'block';
 requestAnimationFrame(loop);
 </script>
