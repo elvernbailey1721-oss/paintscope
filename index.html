@@ -209,6 +209,26 @@
     font-size: 14px;
   }
 
+  @media (max-width: 900px) {
+    #hud-top { top: 8px; left: 8px; right: 8px; flex-direction: column; align-items: stretch; gap: 6px; }
+    .panel { padding: 8px 10px; gap: 8px; flex-wrap: wrap; justify-content: space-between; }
+    .job-title { font-size: 14px; }
+    .progress-wrap { width: 90px; }
+    .pct-text { min-width: 48px; font-size: 13px; }
+    .panel button { padding: 6px 8px; font-size: 12px; }
+    .cash { font-size: 16px; }
+    #stage-hud { display: none; } /* the stage badge already shows progress */
+    #weather-hud { top: auto; bottom: 96px; right: 8px; width: 160px; padding: 8px 10px; }
+    .weather-row { font-size: 11px; padding: 2px 0; }
+    #hud-bottom { bottom: 8px; width: calc(100vw - 16px); }
+    #nozzle-dock { padding: 6px; gap: 4px !important; justify-content: space-between; width: 100%; }
+    .nozzle-btn { min-width: 0; flex: 1; padding: 6px 2px; }
+    .nozzle-name { display: none; }
+    #hint { bottom: auto !important; top: 190px !important; font-size: 12px; }
+    .modal { padding: 18px; }
+    .card { flex-wrap: wrap; }
+  }
+
   @media (max-width: 600px) {
     #cutscene-ui { padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); }
     .cutscene-banner { font-size: 12px; padding: 10px 16px; border-radius: 16px; letter-spacing: 0.02em; max-width: 100%; }
@@ -278,6 +298,28 @@
     text-align: center;
   }
   #toast.show { opacity: 1; }
+
+  #hint {
+    position: fixed;
+    bottom: 118px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: min(560px, calc(100vw - 24px));
+    background: rgba(15, 23, 42, 0.92);
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    color: #e2e8f0;
+    padding: 10px 16px;
+    border-radius: 10px;
+    font-size: 13px;
+    line-height: 1.5;
+    text-align: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.4s;
+    z-index: 30;
+  }
+  #hint.show { opacity: 1; }
 </style>
 </head>
 <body>
@@ -289,7 +331,7 @@
     <p class="sub">Commercial pressure-washing sim. Clean every stage, collect the contract payout, and upgrade your rig.<br>Mouse or touch: hold to spray. Keys 1-5 or scroll to change nozzles.</p>
     <div style="display:flex;flex-direction:column;gap:12px;">
       <button class="primary" id="btn-continue" style="display:none;padding:14px;font-size:16px;" onclick="startGame(true)">▶ Continue</button>
-      <button class="primary" style="padding:14px;font-size:16px;" onclick="startGame(false)">🆕 New Game</button>
+      <button class="primary" id="btn-new" style="padding:14px;font-size:16px;" onclick="newGameClick(this)">🆕 New Game</button>
     </div>
   </div>
 </div>
@@ -340,6 +382,7 @@
 </div>
 
 <div id="toast">Stage Complete!</div>
+<div id="hint"></div>
 
 <!-- Main Playfield -->
 <div id="game-container">
@@ -527,6 +570,16 @@ function applySave(d) {
   (d.completed || []).forEach((row, pi) => (row || []).forEach((c, si) => { if (PROJECTS[pi] && PROJECTS[pi].stages[si]) PROJECTS[pi].stages[si].completed = !!c; }));
 }
 
+let newGameArmed = false;
+function newGameClick(btn) {
+  if (readSave() && !newGameArmed) {
+    newGameArmed = true;
+    btn.textContent = '⚠ This erases your save — tap again to confirm';
+    return;
+  }
+  startGame(false);
+}
+
 function startGame(resume) {
   document.getElementById('start-menu').classList.remove('open');
   sound.unlock();
@@ -674,6 +727,11 @@ const GRID_SCALE = 5; // Pixels per grid cell
 const GROWTH_SCALE = 0.3;   // overall grime regrowth speed
 const CLEAN_GRACE = 6;      // seconds a freshly cleaned cell stays clear of regrowth
 
+// Pack straight-alpha RGBA (alpha 0..1) into a little-endian Uint32 pixel
+function packRGBA(r, g, b, a) {
+  return (((Math.round(a * 255) << 24) | (Math.round(b) << 16) | (Math.round(g) << 8) | Math.round(r)) >>> 0);
+}
+
 // Surface materials, indexed by Grid.material[]
 const MATERIALS = {
   STONE: { id: 0, name: 'brick/stone/concrete', roughness: 0.80, adhesion: 1.0,  hardMul: 1.0, streakCap: 0.30 },
@@ -715,6 +773,18 @@ class FluidGrimeGrid {
     this.adhesion = new Float32Array(this.size);  // How strongly grime clings / grows
     this.streakCap = new Float32Array(this.size); // Max grime that runoff can redeposit
     this.cooldown = new Float32Array(this.size);  // Post-clean regrowth grace (seconds)
+
+    // Grid-resolution render targets (one pixel per cell, scaled up with smoothing off)
+    const mk = () => {
+      const c = document.createElement('canvas');
+      c.width = this.gw; c.height = this.gh;
+      const cx = c.getContext('2d');
+      const img = cx.createImageData(this.gw, this.gh);
+      return { c, cx, img, px: new Uint32Array(img.data.buffer) };
+    };
+    this.dirtRT = mk();
+    this.soapRT = mk();
+    this.scanRT = mk();
 
     this.initMaterialMap(srcCtx, w, h, skyFrac);
   }
@@ -903,18 +973,29 @@ class FluidGrimeGrid {
     c.save();
     c.fillStyle = `rgba(0, 0, 0, ${0.5 * a})`;
     c.fillRect(0, 0, c.canvas.width, c.canvas.height);
-    let dirty = 0;
-    for (let i = 0; i < this.size; i++) if (this.grime[i] > 0.05) dirty++;
-    const pad = dirty < 600 ? 4 : 0; // enlarge lone micro-spots so they pop
-    c.fillStyle = '#ffb000';
-    for (let gy = 0; gy < this.gh; gy++) {
-      for (let gx = 0; gx < this.gw; gx++) {
-        const g = this.grime[gy * this.gw + gx];
-        if (g > 0.05) {
-          c.globalAlpha = Math.min(1, 0.6 + g * 0.5) * a;
-          c.fillRect(gx * GRID_SCALE - pad, gy * GRID_SCALE - pad, GRID_SCALE + pad * 2, GRID_SCALE + pad * 2);
+    const dirty = this.dirtyCount();
+    if (dirty < 600) {
+      // Few cells left: draw them oversized so lone micro-spots pop
+      c.fillStyle = '#ffb000';
+      for (let gy = 0; gy < this.gh; gy++) {
+        for (let gx = 0; gx < this.gw; gx++) {
+          const g = this.grime[gy * this.gw + gx];
+          if (g > 0.05) {
+            c.globalAlpha = Math.min(1, 0.6 + g * 0.5) * a;
+            c.fillRect(gx * GRID_SCALE - 4, gy * GRID_SCALE - 4, GRID_SCALE + 8, GRID_SCALE + 8);
+          }
         }
       }
+    } else {
+      const rt = this.scanRT;
+      rt.px.fill(0);
+      for (let i = 0; i < this.size; i++) {
+        const g = this.grime[i];
+        if (g > 0.05) rt.px[i] = packRGBA(255, 176, 0, Math.min(1, 0.6 + g * 0.5) * a);
+      }
+      rt.cx.putImageData(rt.img, 0, 0);
+      c.imageSmoothingEnabled = false;
+      c.drawImage(rt.c, 0, 0, this.gw * GRID_SCALE, this.gh * GRID_SCALE);
     }
     c.restore();
   }
@@ -926,44 +1007,54 @@ class FluidGrimeGrid {
   }
 
   renderToCanvases() {
-    dirtCtx.clearRect(0, 0, dirtCanvas.width, dirtCanvas.height);
-    soapCtx.clearRect(0, 0, soapCanvas.width, soapCanvas.height);
+    const gw = this.gw, gh = this.gh;
+    const d = this.dirtRT.px, sp = this.soapRT.px;
+    d.fill(0);
+    sp.fill(0);
 
-    for (let gy = 0; gy < this.gh; gy++) {
-      for (let gx = 0; gx < this.gw; gx++) {
-        const i = gy * this.gw + gx;
-        const px = gx * GRID_SCALE;
-        const py = gy * GRID_SCALE;
+    for (let gy = 0; gy < gh; gy++) {
+      for (let gx = 0; gx < gw; gx++) {
+        const i = gy * gw + gx;
 
-        // Render Grime layer
-        if (this.grime[i] > 0.05) {
-          // Tint based on material/moisture (greenish algae when wet, brown soot when dry)
-          const isGreen = this.moisture[i] > 0.5 && (((gx * 73856093) ^ (gy * 19349663)) >>> 0) % 10 > 3;
-          dirtCtx.fillStyle = isGreen ? `rgba(34, 65, 20, ${this.grime[i] * 0.85})` : `rgba(55, 45, 32, ${this.grime[i] * 0.9})`;
-          dirtCtx.fillRect(px, py, GRID_SCALE, GRID_SCALE);
+        // Grime layer: greenish algae when wet, brown soot when dry
+        const gr = this.grime[i];
+        if (gr > 0.05) {
+          const green = this.moisture[i] > 0.5 && (((gx * 73856093) ^ (gy * 19349663)) >>> 0) % 10 > 3;
+          d[i] = green ? packRGBA(34, 65, 20, gr * 0.85) : packRGBA(55, 45, 32, gr * 0.9);
         }
 
-        // Render Soap Foam
-        if (this.foam[i] > 0.1) {
-          soapCtx.fillStyle = `rgba(224, 242, 254, ${Math.min(1, this.foam[i])})`;
-          soapCtx.fillRect(px, py, GRID_SCALE, GRID_SCALE);
-        }
+        // Soap foam, then runoff (blue water -> brown mud) composited over it
+        let pr = 0, pg = 0, pb = 0, pa = 0;
+        const foam = this.foam[i];
+        if (foam > 0.1) { pr = 224; pg = 242; pb = 254; pa = Math.min(1, foam); }
 
-        // Render Runoff Streaks (Visual wetness + sediment)
-        const wDepth = this.water[i];
-        const sed = this.sediment[i];
+        const wDepth = this.water[i], sed = this.sediment[i];
         if (wDepth > 0.1 || sed > 0.03) {
           const sedRatio = sed / (wDepth + 1e-6);
-          const mix = Math.min(1, sedRatio * 6 + sed * 2);           // 0 = clear water, 1 = muddy
-          const rr = Math.round(186 + (96 - 186) * mix);
-          const gg = Math.round(230 + (66 - 230) * mix);
-          const bb = Math.round(253 + (30 - 253) * mix);
+          const mix = Math.min(1, sedRatio * 6 + sed * 2);
+          const rr = 186 + (96 - 186) * mix;
+          const gg = 230 + (66 - 230) * mix;
+          const bb = 253 + (30 - 253) * mix;
           const alpha = Math.min(0.9, wDepth * 0.3 + sed * 3.5);
-          soapCtx.fillStyle = `rgba(${rr}, ${gg}, ${bb}, ${alpha})`;
-          soapCtx.fillRect(px, py, GRID_SCALE, GRID_SCALE);
+          const ao = alpha + pa * (1 - alpha);
+          pr = (rr * alpha + pr * pa * (1 - alpha)) / ao;
+          pg = (gg * alpha + pg * pa * (1 - alpha)) / ao;
+          pb = (bb * alpha + pb * pa * (1 - alpha)) / ao;
+          pa = ao;
         }
+        if (pa > 0) sp[i] = packRGBA(pr, pg, pb, pa);
       }
     }
+
+    const W = gw * GRID_SCALE, H = gh * GRID_SCALE;
+    this.dirtRT.cx.putImageData(this.dirtRT.img, 0, 0);
+    this.soapRT.cx.putImageData(this.soapRT.img, 0, 0);
+    dirtCtx.clearRect(0, 0, dirtCanvas.width, dirtCanvas.height);
+    soapCtx.clearRect(0, 0, soapCanvas.width, soapCanvas.height);
+    dirtCtx.imageSmoothingEnabled = false;
+    soapCtx.imageSmoothingEnabled = false;
+    dirtCtx.drawImage(this.dirtRT.c, 0, 0, W, H);
+    soapCtx.drawImage(this.soapRT.c, 0, 0, W, H);
   }
 }
 
@@ -1464,7 +1555,16 @@ function drawClocktowerClean(c, w, h) {
 }
 
 // ================= GAMEPLAY LOGIC =================
-function loadStage(projectIdx, stageIdx) {
+let hintTimer = null;
+function showHint(html, ms = 7000) {
+  const el = document.getElementById('hint');
+  el.innerHTML = html;
+  el.classList.add('show');
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => el.classList.remove('show'), ms);
+}
+
+function loadStage(projectIdx, stageIdx, announce = true) {
   state.projectIdx = projectIdx;
   state.stageIdx = stageIdx;
   state.stageFinished = false;
@@ -1484,6 +1584,15 @@ function loadStage(projectIdx, stageIdx) {
   fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'), cleanCtx, stage.skyFrac || 0);
 
   updateHUD();
+
+  if (announce) {
+    let msg = `🎯 <b>${stage.name.replace(/^Stage \d+:\s*/, '')}</b> — ${stage.desc}`;
+    if (!state.hintedControls) {
+      state.hintedControls = true;
+      msg += '<br><span style="color:#94a3b8">Hold click / touch to spray · 1-5 or scroll = nozzle · Tab = dirt scan · W = weather</span>';
+    }
+    showHint(msg, state.hintedControls ? 8000 : 8000);
+  }
 }
 
 function setWeather(idx) {
@@ -1754,7 +1863,7 @@ function buyUpgrade(idx) {
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
-  if (state.mode === 'play') loadStage(state.projectIdx, state.stageIdx);
+  if (state.mode === 'play') loadStage(state.projectIdx, state.stageIdx, false);
 }
 window.addEventListener('resize', resize);
 
@@ -1777,6 +1886,7 @@ function endSpray() {
 }
 window.addEventListener('pointerup', endSpray);
 window.addEventListener('pointercancel', endSpray);
+window.addEventListener('blur', endSpray);
 window.addEventListener('wheel', e => {
   if (state.mode !== 'play' || modalOpen()) return;
   const dir = e.deltaY > 0 ? 1 : -1;
