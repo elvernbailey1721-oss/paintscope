@@ -1707,7 +1707,8 @@ function completeCurrentStage() {
   const stage = proj.stages[state.stageIdx];
   const firstClear = !stage.completed;
   stage.completed = true;
-  if (firstClear) state.cash += stage.reward;
+  const payout = firstClear ? stage.reward : Math.round(stage.reward * 0.25); // repeat jobs pay 25%
+  state.cash += payout;
   sound.playChime();
   updateHUD();
 
@@ -1715,8 +1716,8 @@ function completeCurrentStage() {
   // Save pointing at the NEXT stage so a reload during the 2.5s transition still resumes correctly
   saveGame({ stageIdx: hasNextStage ? state.stageIdx + 1 : state.stageIdx });
   showToast(hasNextStage
-    ? `✅ ${stage.name.replace(/^Stage \d+:\s*/, '')} Complete! ${firstClear ? ` +$${stage.reward}` : ''} — Advancing...`
-    : `🏆 Entire Contract Complete!${firstClear ? ` +$${stage.reward} Final Payout!` : ''}`
+    ? `✅ ${stage.name.replace(/^Stage \d+:\s*/, '')} Complete!  +$${payout}${firstClear ? '' : ' (repeat job, 25%)'} — Advancing...`
+    : `🏆 Entire Contract Complete! +$${payout}${firstClear ? ' Final Payout!' : ' (repeat job, 25%)'}`
   );
 
   const pIdx = state.projectIdx, sIdx = state.stageIdx;
