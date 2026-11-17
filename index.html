@@ -224,7 +224,7 @@
     #nozzle-dock { padding: 6px; gap: 4px !important; justify-content: space-between; width: 100%; }
     .nozzle-btn { min-width: 0; flex: 1; padding: 6px 2px; }
     .nozzle-name { display: none; }
-    #hint { bottom: auto !important; top: 190px !important; font-size: 12px; }
+    #hint { bottom: auto !important; top: 206px !important; font-size: 12px; }
     .modal { padding: 18px; }
     .card { flex-wrap: wrap; }
   }
@@ -298,6 +298,22 @@
     text-align: center;
   }
   #toast.show { opacity: 1; }
+  #toast.warn { background: #7f1d1d; border-color: #f87171; color: #fee2e2; box-shadow: 0 10px 30px rgba(127, 29, 29, 0.6); }
+  .nozzle-warn { color: #f87171; }
+
+  /* Stage results */
+  .stars { font-size: 44px; letter-spacing: 8px; margin: 4px 0 18px; }
+  .star { display: inline-block; color: #334155; transform: scale(0.4); opacity: 0; animation: starIn 0.45s forwards; }
+  .star.on { color: #fbbf24; text-shadow: 0 0 18px rgba(251, 191, 36, 0.6); }
+  @keyframes starIn { to { transform: scale(1); opacity: 1; } }
+  .res-rows { text-align: left; margin-bottom: 8px; }
+  .res-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 9px 2px; border-bottom: 1px solid #1e293b; font-size: 14px; }
+  .res-row small { color: #94a3b8; margin-left: 6px; font-size: 12px; }
+  .res-row .neg { color: #f87171; font-weight: 800; }
+  .res-row .pos { color: #34d399; font-weight: 800; }
+  .res-total { display: flex; justify-content: space-between; align-items: baseline; padding: 14px 2px 4px; font-size: 18px; font-weight: 800; }
+  .res-total strong { color: #34d399; font-size: 28px; }
+  .res-clean { color: #94a3b8; font-size: 13px; margin-top: 6px; text-align: left; }
 
   #hint {
     position: fixed;
@@ -348,6 +364,7 @@
       <div class="job-title" id="ui-job-name">3-Story Commercial Complex</div>
       <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
         <span class="stage-badge" id="ui-stage-badge">Stage 1: Walkway</span>
+        <span id="ui-timer" style="white-space:nowrap;font-size:11px;color:#94a3b8;font-variant-numeric:tabular-nums;">⏱ 0:00</span>
       </div>
     </div>
     <div class="progress-wrap"><div class="progress-bar" id="ui-progress"></div></div>
@@ -355,6 +372,7 @@
   </div>
   <div class="panel">
     <div class="cash" id="ui-cash">$350</div>
+    <div id="ui-repairs" title="Repair penalties this stage" style="white-space:nowrap;display:none;color:#f87171;font-weight:800;font-size:13px;"></div>
     <button onclick="triggerDirtScan()" title="Shortcut: Tab or H">🔍 Scan (Tab)</button>
     <button onclick="openModal('jobs-modal')">📋 Contracts</button>
     <button onclick="openModal('shop-modal')">🔧 Rig Shop</button>
@@ -392,6 +410,22 @@
 <!-- Bottom Nozzle Dock -->
 <div id="hud-bottom" class="hidden">
   <div class="panel" id="nozzle-dock" style="gap:10px;"></div>
+</div>
+
+<!-- Stage Results Modal -->
+<div class="modal-backdrop" id="results-modal">
+  <div class="modal" style="max-width:520px;text-align:center;">
+    <h2 id="res-title">Stage Complete</h2>
+    <p class="sub" id="res-sub" style="margin-bottom:12px;"></p>
+    <div id="res-stars" class="stars"></div>
+    <div id="res-rows" class="res-rows"></div>
+    <div class="res-total"><span>Total payout</span><strong id="res-total">$0</strong></div>
+    <div class="res-clean" id="res-clean"></div>
+    <div class="modal-footer" style="justify-content:center;margin-top:22px;">
+      <button onclick="resultsContracts()">📋 Contracts</button>
+      <button class="primary" id="res-next" onclick="resultsNext()">Next Stage ▶</button>
+    </div>
+  </div>
 </div>
 
 <!-- Project Board Modal -->
@@ -500,6 +534,31 @@ class SoundEngine {
       osc.stop(now + 0.36);
     });
   }
+  playDamage() {
+    if (!this.enabled) return;
+    if (!this.ctx) this.init();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const c = this.ctx, now = c.currentTime;
+    // low warning buzz
+    const osc = c.createOscillator(), og = c.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150, now);
+    osc.frequency.exponentialRampToValueAtTime(55, now + 0.28);
+    og.gain.setValueAtTime(0.13, now);
+    og.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    osc.connect(og); og.connect(c.destination);
+    osc.start(now); osc.stop(now + 0.31);
+    // glassy crunch
+    const len = Math.floor(c.sampleRate * 0.16);
+    const buf = c.createBuffer(1, len, c.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2);
+    const src = c.createBufferSource(); src.buffer = buf;
+    const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2500;
+    const ng = c.createGain(); ng.gain.value = 0.35;
+    src.connect(hp); hp.connect(ng); ng.connect(c.destination);
+    src.start(now);
+  }
   playChime() {
     if (!this.enabled) return;
     if (!this.ctx) this.init();
@@ -531,7 +590,8 @@ function saveGame(over = {}) {
       projectIdx: over.projectIdx ?? state.projectIdx,
       stageIdx: over.stageIdx ?? state.stageIdx,
       upgrades: UPGRADES.map(u => u.level),
-      completed: PROJECTS.map(p => p.stages.map(st => !!st.completed))
+      completed: PROJECTS.map(p => p.stages.map(st => !!st.completed)),
+      stars: PROJECTS.map(p => p.stages.map(st => st.stars || 0))
     }));
   } catch (e) { /* storage unavailable */ }
 }
@@ -568,6 +628,7 @@ function applySave(d) {
   state.stageIdx = PROJECTS[state.projectIdx].stages[d.stageIdx] ? d.stageIdx : 0;
   (d.upgrades || []).forEach((lv, i) => { if (UPGRADES[i]) UPGRADES[i].level = Math.max(1, Math.min(UPGRADES[i].max, lv | 0)); });
   (d.completed || []).forEach((row, pi) => (row || []).forEach((c, si) => { if (PROJECTS[pi] && PROJECTS[pi].stages[si]) PROJECTS[pi].stages[si].completed = !!c; }));
+  (d.stars || []).forEach((row, pi) => (row || []).forEach((n, si) => { if (PROJECTS[pi] && PROJECTS[pi].stages[si]) PROJECTS[pi].stages[si].stars = Math.max(0, Math.min(3, n | 0)); }));
 }
 
 let newGameArmed = false;
@@ -606,11 +667,11 @@ function toggleAudio() {
 
 // ================= GAME DATA & CONFIG =================
 const NOZZLES = [
-  { id: '0deg',  name: '0° Red Jet',     color: '#ef4444', radius: 14, power: 1.0,  freq: 2200, q: 1.4, desc: 'Pinpoint blast for stubborn hardened grime & high reach' },
-  { id: '15deg', name: '15° Yellow',     color: '#eab308', radius: 26, power: 0.74, freq: 1650, q: 1.0, desc: 'Heavy surface stripping for brick, stone & concrete' },
-  { id: '25deg', name: '25° Green',      color: '#22c55e', radius: 42, power: 0.58, freq: 1200, q: 0.8, desc: 'All-purpose siding, deck & walkway wash' },
-  { id: '40deg', name: '40° White',      color: '#f8fafc', radius: 62, power: 0.45, freq: 850,  q: 0.6, desc: 'Wide gentle rinse for storefront glass & vehicle trim' },
-  { id: 'soap',  name: 'Soft-Wash Foam', color: '#38bdf8', radius: 76, power: 0.05, freq: 620,  q: 0.5, desc: 'Applies surfactant chemical foam to dissolve 3-story algae', isSoap: true }
+  { id: '0deg',  name: '0° Red Jet',     color: '#ef4444', radius: 14, power: 1.25, rate: 1.8, impact: 1.0,  freq: 2200, q: 1.4, desc: 'SPOT BLASTER: cuts gum, oil, baked crust and high cornices fast. Small footprint. CHIPS glass & trim!' },
+  { id: '15deg', name: '15° Yellow',     color: '#eab308', radius: 26, power: 0.74, rate: 1.0, impact: 0.55, freq: 1650, q: 1.0, desc: 'Heavy stripping for brick, stone & concrete. Can chip glass & trim at the centre of the stream.' },
+  { id: '25deg', name: '25° Green',      color: '#22c55e', radius: 42, power: 0.58, rate: 1.0, impact: 0.25, freq: 1200, q: 0.8, desc: 'All-purpose wash. Cuts soft grime; stalls on hard crust. Safe unless the pump is maxed.' },
+  { id: '40deg', name: '40° White',      color: '#f8fafc', radius: 62, power: 0.45, rate: 1.0, impact: 0.1,  freq: 850,  q: 0.6, desc: 'Wide, safe rinse for glass & trim. Stalls on baked crust unless pre-soaked with foam.' },
+  { id: 'soap',  name: 'Soft-Wash Foam', color: '#38bdf8', radius: 76, power: 0.05, rate: 1.0, impact: 0,    freq: 620,  q: 0.5, desc: 'Pre-soak: softens baked-on crust and boosts the next rinse. Harmless to glass.', isSoap: true }
 ];
 
 const WEATHER_STATES = [
@@ -708,7 +769,10 @@ let state = {
   scanPulse: 0,
   mouse: { x: 400, y: 300, down: false },
   particles: [],
-  rain: []
+  rain: [],
+  stageTime: 0,
+  stats: { etchedCells: 0, incidents: 0, repairPenalty: 0, lastIncident: -99 },
+  pendingResults: null
 };
 
 const canvas = document.getElementById('canvas');
@@ -720,12 +784,14 @@ const dirtCanvas = document.createElement('canvas');
 const dirtCtx = dirtCanvas.getContext('2d');
 const soapCanvas = document.createElement('canvas');
 const soapCtx = soapCanvas.getContext('2d');
+const damageCanvas = document.createElement('canvas');
+const damageCtx = damageCanvas.getContext('2d');
 
 // Low-Resolution Fluid & Grime Simulation Grid
 let fluidGrid = null;
 const GRID_SCALE = 5; // Pixels per grid cell
-const GROWTH_SCALE = 0.3;   // overall grime regrowth speed
-const CLEAN_GRACE = 6;      // seconds a freshly cleaned cell stays clear of regrowth
+const GROWTH_SCALE = 0.05;  // overall grime regrowth speed
+const CLEAN_GRACE = 25;     // seconds a freshly cleaned cell stays clear of regrowth
 
 // Pack straight-alpha RGBA (alpha 0..1) into a little-endian Uint32 pixel
 function packRGBA(r, g, b, a) {
@@ -740,7 +806,11 @@ const MATERIALS = {
   TRIM:  { id: 2, name: 'metal/painted trim',   roughness: 0.30, adhesion: 0.5,  hardMul: 0.8, streakCap: 0.40 }
 };
 const MATERIAL_LIST = [MATERIALS.STONE, MATERIALS.GLASS, MATERIALS.TRIM, MATERIALS.AIR];
-const AIR_ID = MATERIALS.AIR.id;  // sky cells never hold grime, water or foam and don't count for completion
+const AIR_ID = MATERIALS.AIR.id;
+const FRAGILE = [0, 0.45, 0.55, 0];            // chip threshold by material id (0 = cannot be damaged)
+const MATERIAL_CUT = [1.0, 0.75, 0.85, 1.0];   // grime cutting-threshold multiplier by material id
+const STAGE_PAR = { walkway: 140, facade_lower: 85, facade_upper: 70, promenade: 140, clocktower: 70 }; // seconds @1280x720
+  // sky cells never hold grime, water or foam and don't count for completion
 
 // Infer the material from the clean artwork colour so physics follows the picture.
 function classifyMaterial(r, g, b, isFacade) {
@@ -773,6 +843,10 @@ class FluidGrimeGrid {
     this.adhesion = new Float32Array(this.size);  // How strongly grime clings / grows
     this.streakCap = new Float32Array(this.size); // Max grime that runoff can redeposit
     this.cooldown = new Float32Array(this.size);  // Post-clean regrowth grace (seconds)
+    this.damage = new Float32Array(this.size);    // Surface etching on glass / trim (>=0.5 = chipped)
+    this.stubborn = new Uint8Array(this.size);    // Gum / oil spots: extra cutting threshold
+    this.cracks = [];                             // Crack stars drawn over chipped areas
+    this.damageDirty = false;
 
     // Grid-resolution render targets (one pixel per cell, scaled up with smoothing off)
     const mk = () => {
@@ -785,6 +859,7 @@ class FluidGrimeGrid {
     this.dirtRT = mk();
     this.soapRT = mk();
     this.scanRT = mk();
+    this.dmgRT = mk();
 
     this.initMaterialMap(srcCtx, w, h, skyFrac);
   }
@@ -819,6 +894,24 @@ class FluidGrimeGrid {
         this.sun[i] = Math.max(0, Math.min(1, 0.2 + (1 - normY) * 0.5 + Math.random() * 0.3));
       }
     }
+    // Chewing-gum / oil spots: ~3% of the surface, hardest crust, can't be fully softened
+    const spots = Math.floor(this.size / 1000);
+    for (let k = 0; k < spots; k++) {
+      const cx = Math.floor(Math.random() * this.gw), cy = Math.floor(Math.random() * this.gh);
+      const r = 2 + Math.floor(Math.random() * 3);
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const x = cx + dx, y = cy + dy;
+          if (x < 0 || y < 0 || x >= this.gw || y >= this.gh || dx * dx + dy * dy > r * r + 1) continue;
+          const i = y * this.gw + x;
+          if (this.material[i] === AIR_ID) continue;
+          this.stubborn[i] = 1;
+          this.grime[i] = 1;
+          this.hardness[i] = 1;
+        }
+      }
+    }
+
     this.initialGrime = 0;
     for (let i = 0; i < this.size; i++) this.initialGrime += this.grime[i];
   }
@@ -860,9 +953,10 @@ class FluidGrimeGrid {
 
       // Baking vs Softening
       if (this.moisture[i] < 0.2 && temp > 25) {
-        this.hardness[i] = Math.min(1, this.hardness[i] + 0.06 * dt);
+        this.hardness[i] = Math.min(1, this.hardness[i] + 0.005 * dt); // slow baking in dry heat
       } else if (this.moisture[i] > 0.6) {
-        this.hardness[i] = Math.max(0, this.hardness[i] - 0.3 * dt);
+        // Plain water / rain only softens crust slowly; foam is the real pre-soak
+        this.hardness[i] = Math.max(this.stubborn[i] ? 0.55 : 0, this.hardness[i] - 0.02 * dt);
       }
     }
 
@@ -919,7 +1013,9 @@ class FluidGrimeGrid {
     }
   }
 
-  applySpray(screenX, screenY, sprayRadius, nozzlePower, isSoapOverride) {
+  applySpray(screenX, screenY, sprayRadius, nozzlePower, isSoapOverride, opts = {}) {
+    const impact = opts.impact || 0;   // damage potency of the nozzle
+    const rate = opts.rate || 1;       // cutting-speed multiplier
     const lanceBonus = 1 + (UPGRADES[1].level - 1) * 0.20;
     const psiBonus = 1 + (UPGRADES[0].level - 1) * 0.25;
     const soapLevel = UPGRADES[2].level;
@@ -929,6 +1025,8 @@ class FluidGrimeGrid {
     const endX = Math.min(this.gw - 1, Math.floor((screenX + effectiveRadius) / GRID_SCALE));
     const startY = Math.max(0, Math.floor((screenY - effectiveRadius) / GRID_SCALE));
     const endY = Math.min(this.gh - 1, Math.floor((screenY + effectiveRadius) / GRID_SCALE));
+
+    let chips = 0; // newly chipped delicate cells this call
 
     for (let gy = startY; gy <= endY; gy++) {
       for (let gx = startX; gx <= endX; gx++) {
@@ -943,19 +1041,32 @@ class FluidGrimeGrid {
           this.water[i] += falloff * 0.45;
           this.moisture[i] = 1.0;
 
+          // Delicate surfaces: glass and painted trim chip under a high-impact stream
+          if (impact > 0) {
+            const frag = FRAGILE[this.material[i]];
+            if (frag && impact * psiBonus * falloff > frag) {
+              const before = this.damage[i];
+              this.damage[i] = Math.min(1, before + 0.34);
+              this.damageDirty = true;
+              if (before < 0.5 && this.damage[i] >= 0.5) {
+                chips++;
+                if (chips % 6 === 1 && this.cracks.length < 80) this.cracks.push({ x: cx, y: cy, s: Math.random() * 1000 });
+              }
+            }
+          }
+
           if (isSoapOverride) {
             this.foam[i] = Math.min(1, this.foam[i] + falloff * 0.8);
-            // Surfactant softens baked-on grime (stronger with the chem injector)
-            this.hardness[i] = Math.max(0, this.hardness[i] - falloff * 0.05 * soapLevel);
+            // Surfactant softens baked-on crust (stronger with the chem injector); gum keeps a hard core
+            this.hardness[i] = Math.max(this.stubborn[i] ? 0.55 : 0, this.hardness[i] - falloff * 0.03 * soapLevel);
           } else {
-            // Erosion calculation
+            // Cutting needs a minimum power that rises with hardness; gum / oil spots add more
+            const threshold = (0.25 + 0.55 * this.hardness[i]) * MATERIAL_CUT[this.material[i]] + (this.stubborn[i] ? 0.2 : 0);
             const foamBoost = this.foam[i] > 0.5 ? 1.6 + (soapLevel - 1) * 0.3 : 1.0;
-            const soakFactor = foamBoost * (this.moisture[i] > 0.8 ? 1.1 : 1.0);
-            const effectivePSI = nozzlePower * psiBonus * soakFactor;
-            const resistance = this.hardness[i] * 0.6 + this.roughness[i] * 0.4;
+            const effectivePSI = nozzlePower * psiBonus * foamBoost * 1.1; // wet-surface bonus
 
-            if (effectivePSI > resistance * 0.4) {
-              const removeAmount = (effectivePSI - resistance * 0.4) * falloff * 0.35;
+            if (effectivePSI > threshold) {
+              const removeAmount = (effectivePSI - threshold) * falloff * 0.5 * rate;
               const detached = Math.min(this.grime[i], removeAmount);
               this.grime[i] -= detached;
               if (this.grime[i] < 0.05) this.cooldown[i] = CLEAN_GRACE;
@@ -964,6 +1075,56 @@ class FluidGrimeGrid {
             this.foam[i] = Math.max(0, this.foam[i] - falloff * 0.15); // clear-water rinse strips foam
           }
         }
+      }
+    }
+    return chips;
+  }
+
+  // Would this nozzle chip the surface under the cursor right now?
+  riskAt(x, y, impact) {
+    if (impact <= 0) return false;
+    const gx = Math.max(0, Math.min(this.gw - 1, Math.floor(x / GRID_SCALE)));
+    const gy = Math.max(0, Math.min(this.gh - 1, Math.floor(y / GRID_SCALE)));
+    const frag = FRAGILE[this.material[gy * this.gw + gx]];
+    return !!frag && impact * (1 + (UPGRADES[0].level - 1) * 0.25) > frag;
+  }
+
+  // Etched glass / trim: scuffed cells plus crack stars, redrawn only when damage changes
+  renderDamage() {
+    this.damageDirty = false;
+    const rt = this.dmgRT, px = rt.px;
+    px.fill(0);
+    for (let gy = 0; gy < this.gh; gy++) {
+      for (let gx = 0; gx < this.gw; gx++) {
+        const i = gy * this.gw + gx;
+        const dm = this.damage[i];
+        if (dm <= 0.05) continue;
+        if (dm >= 0.5) {
+          const h = (((gx * 2654435761) ^ (gy * 40503)) >>> 0) % 7;
+          px[i] = h < 3 ? packRGBA(241, 245, 249, 0.9) : h < 5 ? packRGBA(15, 23, 42, 0.75) : packRGBA(148, 163, 184, 0.65);
+        } else {
+          px[i] = packRGBA(226, 232, 240, dm * 0.5); // faint haze before it chips
+        }
+      }
+    }
+    rt.cx.putImageData(rt.img, 0, 0);
+    damageCtx.clearRect(0, 0, damageCanvas.width, damageCanvas.height);
+    damageCtx.imageSmoothingEnabled = false;
+    damageCtx.drawImage(rt.c, 0, 0, this.gw * GRID_SCALE, this.gh * GRID_SCALE);
+    damageCtx.lineCap = 'round';
+    for (const c of this.cracks) {
+      let sd = c.s;
+      const rnd = () => { sd = (sd * 9301 + 49297) % 233280; return sd / 233280; };
+      const n = 5 + Math.floor(rnd() * 3);
+      for (let k = 0; k < n; k++) {
+        const ang = rnd() * Math.PI * 2, len = 10 + rnd() * 20;
+        const ex = c.x + Math.cos(ang) * len, ey = c.y + Math.sin(ang) * len;
+        damageCtx.strokeStyle = 'rgba(15, 23, 42, 0.8)';
+        damageCtx.lineWidth = 2.4;
+        damageCtx.beginPath(); damageCtx.moveTo(c.x, c.y); damageCtx.lineTo(ex, ey); damageCtx.stroke();
+        damageCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+        damageCtx.lineWidth = 1.1;
+        damageCtx.beginPath(); damageCtx.moveTo(c.x + 0.8, c.y + 0.8); damageCtx.lineTo(ex + 0.8, ey + 0.8); damageCtx.stroke();
       }
     }
   }
@@ -1020,7 +1181,8 @@ class FluidGrimeGrid {
         const gr = this.grime[i];
         if (gr > 0.05) {
           const green = this.moisture[i] > 0.5 && (((gx * 73856093) ^ (gy * 19349663)) >>> 0) % 10 > 3;
-          d[i] = green ? packRGBA(34, 65, 20, gr * 0.85) : packRGBA(55, 45, 32, gr * 0.9);
+          d[i] = this.stubborn[i] ? packRGBA(14, 11, 9, 0.97)           // gum / oil: near-black
+               : green ? packRGBA(34, 65, 20, gr * 0.85) : packRGBA(55, 45, 32, gr * 0.9);
         }
 
         // Soap foam, then runoff (blue water -> brown mud) composited over it
@@ -1055,6 +1217,7 @@ class FluidGrimeGrid {
     soapCtx.imageSmoothingEnabled = false;
     dirtCtx.drawImage(this.dirtRT.c, 0, 0, W, H);
     soapCtx.drawImage(this.soapRT.c, 0, 0, W, H);
+    if (this.damageDirty) this.renderDamage();
   }
 }
 
@@ -1569,6 +1732,11 @@ function loadStage(projectIdx, stageIdx, announce = true) {
   state.stageIdx = stageIdx;
   state.stageFinished = false;
   state.pctClean = 0;
+  if (announce) {
+    state.stageTime = 0;
+    state.stats = { etchedCells: 0, incidents: 0, repairPenalty: 0, lastIncident: -99 };
+    state.pendingResults = null;
+  }
 
   const proj = PROJECTS[projectIdx];
   const stage = proj.stages[stageIdx];
@@ -1579,6 +1747,8 @@ function loadStage(projectIdx, stageIdx, announce = true) {
   dirtCanvas.height = canvas.height;
   soapCanvas.width = canvas.width;
   soapCanvas.height = canvas.height;
+  damageCanvas.width = canvas.width;
+  damageCanvas.height = canvas.height;
 
   stage.drawClean(cleanCtx, canvas.width, canvas.height);
   fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'), cleanCtx, stage.skyFrac || 0);
@@ -1589,9 +1759,9 @@ function loadStage(projectIdx, stageIdx, announce = true) {
     let msg = `🎯 <b>${stage.name.replace(/^Stage \d+:\s*/, '')}</b> — ${stage.desc}`;
     if (!state.hintedControls) {
       state.hintedControls = true;
-      msg += '<br><span style="color:#94a3b8">Hold click / touch to spray · 1-5 or scroll = nozzle · Tab = dirt scan · W = weather</span>';
+      msg += '<br><span style="color:#94a3b8">Hold click / touch to spray · 1-5 or scroll = nozzle · Tab = dirt scan · W = weather<br>⚠ 0° / 15° chip glass &amp; trim — use 40° or foam near windows. Foam pre-soaks baked crust.</span>';
     }
-    showHint(msg, state.hintedControls ? 8000 : 8000);
+    showHint(msg, 9000);
   }
 }
 
@@ -1697,39 +1867,89 @@ function measureCleanliness() {
   }
 }
 
+function starText(n) {
+  n = Math.max(0, Math.min(3, n | 0));
+  return '★'.repeat(n) + '☆'.repeat(3 - n);
+}
+
+function computeResults(stage, firstClear, finalPct) {
+  const par = parFor(stage);
+  const time = state.stageTime;
+  const base = firstClear ? stage.reward : Math.round(stage.reward * 0.25); // repeat jobs pay 25%
+  const speedFactor = Math.max(0, Math.min(1, (2 * par - time) / par));      // full at/under par, none at 2x par
+  const speedBonus = Math.round(base * 0.5 * speedFactor);
+  const st = state.stats;
+  const clean = st.etchedCells === 0 && st.incidents === 0;
+  const precisionBonus = clean ? Math.round(base * 0.25) : 0;
+  const gross = base + speedBonus + precisionBonus;
+  const repairs = Math.min(st.repairPenalty, gross);
+  const stars = 1 + (time <= par * 1.5 ? 1 : 0) + (clean ? 1 : 0);
+  return { base, speedBonus, precisionBonus, repairs, total: gross - repairs, par, time, clean, incidents: st.incidents,
+           etched: st.etchedCells, stars, pct: finalPct, firstClear };
+}
+
 function completeCurrentStage() {
   state.stageFinished = true;
-  state.pctClean = 100;
-  document.getElementById('ui-progress').style.width = '100%';
-  document.getElementById('ui-pct').textContent = '100%';
-
   const proj = PROJECTS[state.projectIdx];
   const stage = proj.stages[state.stageIdx];
   const firstClear = !stage.completed;
+  const r = computeResults(stage, firstClear, state.pctClean);
+
   stage.completed = true;
-  const payout = firstClear ? stage.reward : Math.round(stage.reward * 0.25); // repeat jobs pay 25%
-  state.cash += payout;
+  stage.stars = Math.max(stage.stars || 0, r.stars);
+  state.cash += r.total;
   sound.playChime();
-  updateHUD();
 
   const hasNextStage = state.stageIdx + 1 < proj.stages.length;
-  // Save pointing at the NEXT stage so a reload during the 2.5s transition still resumes correctly
+  r.hasNext = hasNextStage;
+  state.pendingResults = r;
+  updateHUD();
+  // Save already pointing at the NEXT stage, so a reload while the results are open resumes correctly
   saveGame({ stageIdx: hasNextStage ? state.stageIdx + 1 : state.stageIdx });
-  showToast(hasNextStage
-    ? `✅ ${stage.name.replace(/^Stage \d+:\s*/, '')} Complete!  +$${payout}${firstClear ? '' : ' (repeat job, 25%)'} — Advancing...`
-    : `🏆 Entire Contract Complete! +$${payout}${firstClear ? ' Final Payout!' : ' (repeat job, 25%)'}`
-  );
+  showResults(r, stage, proj);
+}
 
-  const pIdx = state.projectIdx, sIdx = state.stageIdx;
-  setTimeout(() => {
-    if (state.projectIdx !== pIdx || state.stageIdx !== sIdx) return; // player already moved on
-    if (hasNextStage) {
-      loadStage(state.projectIdx, state.stageIdx + 1);
-      saveGame();
-    } else {
-      openModal('jobs-modal');
-    }
-  }, 2500);
+function showResults(r, stage, proj) {
+  const name = stage.name.replace(/^Stage \d+:\s*/, '');
+  document.getElementById('res-title').textContent = r.hasNext ? '✅ Stage Complete' : '🏆 Contract Complete';
+  document.getElementById('res-sub').textContent = `${proj.name} — ${name}`;
+  document.getElementById('res-stars').innerHTML = [0, 1, 2].map(k =>
+    `<span class="star ${k < r.stars ? 'on' : ''}" style="animation-delay:${0.15 + k * 0.28}s">★</span>`).join('');
+  const rows = [
+    [`Base payout${r.firstClear ? '' : '<small>repeat job, 25%</small>'}`, `$${r.base}`, ''],
+    [`Speed bonus<small>${fmtTime(r.time)} vs par ${fmtTime(r.par)}</small>`, r.speedBonus ? `+$${r.speedBonus}` : '$0', r.speedBonus ? 'pos' : ''],
+    [r.clean ? 'Precision bonus<small>zero surface damage</small>' : `Precision bonus<small>${r.incidents} damage incident${r.incidents === 1 ? '' : 's'}</small>`,
+      r.precisionBonus ? `+$${r.precisionBonus}` : '$0', r.precisionBonus ? 'pos' : ''],
+    ['Repair penalties', r.repairs ? `−$${r.repairs}` : '$0', r.repairs ? 'neg' : '']
+  ];
+  document.getElementById('res-rows').innerHTML = rows.map(([k, v, c]) =>
+    `<div class="res-row"><span>${k}</span><span class="${c}">${v}</span></div>`).join('');
+  document.getElementById('res-total').textContent = `$${r.total}`;
+  document.getElementById('res-clean').textContent =
+    `Final cleanliness ${r.pct.toFixed(1)}% · ${starText(r.stars)} (3★ = zero damage and under 1.5× par)`;
+  document.getElementById('res-next').textContent = r.hasNext ? 'Next Stage ▶' : 'Finish Contract ▶';
+  openModal('results-modal');
+}
+
+function resultsNext() {
+  const r = state.pendingResults;
+  if (!r) { closeModals(); return; }
+  state.pendingResults = null;
+  closeModals();
+  if (r.hasNext) {
+    loadStage(state.projectIdx, state.stageIdx + 1);
+    saveGame();
+  } else {
+    openModal('jobs-modal');
+  }
+}
+
+function resultsContracts() {
+  const r = state.pendingResults;
+  state.pendingResults = null;
+  closeModals();
+  if (r && r.hasNext) { loadStage(state.projectIdx, state.stageIdx + 1); saveGame(); }
+  openModal('jobs-modal');
 }
 
 function triggerDirtScan() {
@@ -1739,11 +1959,14 @@ function triggerDirtScan() {
   showToast(n ? `🔍 Scan: ${n} dirty cells remaining (${(100 * n / fluidGrid.size).toFixed(1)}% of surface)` : '🔍 Scan: surface is spotless!');
 }
 
-function showToast(msg) {
+let toastTimer = null;
+function showToast(msg, warn = false) {
   const el = document.getElementById('toast');
   el.textContent = msg;
+  el.classList.toggle('warn', !!warn);
   el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 3000);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
 }
 
 // ================= HUD & MODALS =================
@@ -1753,6 +1976,8 @@ function updateHUD() {
   document.getElementById('ui-job-name').textContent = proj.name;
   document.getElementById('ui-stage-badge').textContent = `${stage.name} (${state.stageIdx + 1}/${proj.stages.length})`;
   document.getElementById('ui-cash').textContent = `$${state.cash}`;
+  updateRepairHUD();
+  updateTimerHUD();
 
   // Stage Sub-HUD list
   const stageList = document.getElementById('stage-list');
@@ -1766,13 +1991,49 @@ function updateHUD() {
   }).join('');
 }
 
+function fmtTime(sec) {
+  sec = Math.max(0, Math.round(sec));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+// Par time scales with screen area (bigger screen = more to clean)
+function parFor(stage) {
+  const area = canvas.width * canvas.height;
+  return Math.round((STAGE_PAR[stage.id] || 90) * Math.max(0.5, Math.min(2.5, area / (1280 * 720))));
+}
+
+function updateTimerHUD() {
+  const stage = PROJECTS[state.projectIdx].stages[state.stageIdx];
+  document.getElementById('ui-timer').textContent = `⏱ ${fmtTime(state.stageTime)} / par ${fmtTime(parFor(stage))}`;
+}
+
+function updateRepairHUD() {
+  const el = document.getElementById('ui-repairs');
+  const r = state.stats.repairPenalty;
+  el.style.display = r > 0 ? 'block' : 'none';
+  el.textContent = `🔧 −$${r}`;
+}
+
+function onSurfaceDamage(chips, nozzle) {
+  const st = state.stats;
+  st.etchedCells += chips;
+  if (st.incidents > 0 && state.stageTime - st.lastIncident < 1.2) return; // one charge per incident
+  st.lastIncident = state.stageTime;
+  st.incidents++;
+  const cost = nozzle.impact >= 0.9 ? 15 : nozzle.impact >= 0.5 ? 10 : 5;
+  st.repairPenalty += cost;
+  sound.playDamage();
+  showToast(`⚠ Surface damaged! −$${cost} repair — use the 40° White or foam near glass & trim`, true);
+  updateRepairHUD();
+}
+
 function buildNozzleDock() {
   const dock = document.getElementById('nozzle-dock');
   dock.innerHTML = NOZZLES.map((n, idx) => `
     <button class="nozzle-btn ${idx === state.nozzleIdx ? 'active' : ''}" onclick="selectNozzle(${idx})" title="${n.desc}">
       <span class="nozzle-dot" style="background:${n.color}"></span>
       <span class="nozzle-name">${n.name}</span>
-      <span class="nozzle-key">[${idx + 1}]</span>
+      <span class="nozzle-key">[${idx + 1}]${n.impact >= 0.5 ? ' <span class="nozzle-warn" title="Chips glass & trim">⚠</span>' : ''}</span>
     </button>
   `).join('');
 }
@@ -1814,7 +2075,7 @@ function renderJobsModal() {
       <div class="stage-pills">
         ${p.stages.map((st, sIdx) => `
           <button class="pill" onclick="startProjectStage(${pIdx}, ${sIdx})">
-            ${st.completed ? '✅' : '▶'} ${st.name.replace(/^Stage \d+:\s*/, '')} ($${st.reward})
+            ${st.completed ? starText(st.stars || 1) : '▶'} ${st.name.replace(/^Stage \d+:\s*/, '')} ($${st.reward})
           </button>
         `).join('')}
       </div>
@@ -1864,7 +2125,11 @@ function buyUpgrade(idx) {
 function resize() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
-  if (state.mode === 'play') loadStage(state.projectIdx, state.stageIdx, false);
+  if (state.mode === 'play') {
+    const fin = state.stageFinished; // keep a finished stage finished while its results are showing
+    loadStage(state.projectIdx, state.stageIdx, false);
+    state.stageFinished = fin;
+  }
 }
 window.addEventListener('resize', resize);
 
@@ -1900,7 +2165,10 @@ window.addEventListener('keydown', e => {
     triggerDirtScan();
   }
   if (e.key.toLowerCase() === 'w' && state.mode === 'play' && !modalOpen()) nextWeather();
-  if (e.key === 'Escape') closeModals();
+  if (e.key === 'Escape') {
+    if (document.getElementById('results-modal').classList.contains('open')) resultsNext(); // never strand a finished stage
+    else closeModals();
+  }
 });
 
 let lastTime = performance.now();
@@ -1919,11 +2187,14 @@ function loop(now) {
     drawCutscene(dt);
   } else {
     updateWeather(dt);
+    if (!state.stageFinished && !modalOpen()) state.stageTime += dt;
 
     if (fluidGrid) {
       if (state.mouse.down && !modalOpen()) {
         const nozzle = NOZZLES[state.nozzleIdx];
-        fluidGrid.applySpray(state.mouse.x, state.mouse.y, nozzle.radius, nozzle.power, nozzle.isSoap);
+        const chips = fluidGrid.applySpray(state.mouse.x, state.mouse.y, nozzle.radius, nozzle.power, nozzle.isSoap,
+          { impact: nozzle.impact || 0, rate: nozzle.rate || 1 });
+        if (chips > 0) onSurfaceDamage(chips, nozzle);
         spawnSprayParticles(state.mouse.x, state.mouse.y, nozzle);
       }
 
@@ -1934,6 +2205,7 @@ function loop(now) {
       if (measureTimer > 0.15) {
         measureTimer = 0;
         measureCleanliness();
+        updateTimerHUD();
       }
     }
 
@@ -1941,6 +2213,7 @@ function loop(now) {
     ctx.drawImage(cleanCanvas, 0, 0);
     ctx.drawImage(dirtCanvas, 0, 0);
     ctx.drawImage(soapCanvas, 0, 0);
+    ctx.drawImage(damageCanvas, 0, 0);
 
     // Overcast tint and rain
     drawWeatherOverlay(dt);
@@ -2004,11 +2277,14 @@ function loop(now) {
     const nozzle = NOZZLES[state.nozzleIdx];
     const lanceBonus = 1 + (UPGRADES[1].level - 1) * 0.20;
     const r = nozzle.radius * lanceBonus;
-    ctx.strokeStyle = nozzle.color;
+    const risky = fluidGrid && fluidGrid.riskAt(state.mouse.x, state.mouse.y, nozzle.impact || 0);
+    ctx.strokeStyle = risky ? '#f87171' : nozzle.color;
     ctx.lineWidth = 2.5;
+    if (risky) ctx.setLineDash([6, 4]); // dashed red reticle = this will chip the surface
     ctx.beginPath();
     ctx.arc(state.mouse.x, state.mouse.y, r, 0, Math.PI * 2);
     ctx.stroke();
+    ctx.setLineDash([]);
     ctx.beginPath();
     ctx.arc(state.mouse.x, state.mouse.y, 3, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
