@@ -44,7 +44,13 @@
     pointer-events: none; /* sprays pass through panel backgrounds; buttons stay clickable */
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
   }
-  .panel button, #weather-hud button { pointer-events: auto; }
+  .panel button, #weather-hud button { pointer-events: auto; white-space: nowrap; }
+  @media (max-width: 1400px) {
+    .progress-wrap { width: 120px; }
+    .panel { gap: 10px; padding: 8px 12px; }
+    .panel button { padding: 6px 10px; }
+    #ui-timer { font-size: 10px !important; }
+  }
   #hud-bottom { pointer-events: none; }
 
   .job-title { font-weight: 800; font-size: 16px; color: #38bdf8; letter-spacing: 0.015em; }
@@ -83,7 +89,7 @@
   /* Stage Sub-HUD */
   #stage-hud {
     position: fixed;
-    top: 74px;
+    top: 100px;
     left: 16px;
     z-index: 20;
     background: rgba(15, 23, 42, 0.88);
@@ -113,7 +119,7 @@
   /* Live Weather & Simulation HUD */
   #weather-hud {
     position: fixed;
-    top: 74px;
+    top: 100px;
     right: 16px;
     z-index: 20;
     background: rgba(15, 23, 42, 0.88);
@@ -220,13 +226,19 @@
     #stage-hud { display: none; } /* the stage badge already shows progress */
     #weather-hud { top: auto; bottom: 96px; right: 8px; width: 160px; padding: 8px 10px; }
     .weather-row { font-size: 11px; padding: 2px 0; }
+    .weather-header { flex-direction: column; align-items: flex-start; gap: 2px; }
     #hud-bottom { bottom: 8px; width: calc(100vw - 16px); }
     #nozzle-dock { padding: 6px; gap: 4px !important; justify-content: space-between; width: 100%; }
     .nozzle-btn { min-width: 0; flex: 1; padding: 6px 2px; }
     .nozzle-name { display: none; }
-    #hint { bottom: auto !important; top: 206px !important; font-size: 12px; }
+    #hint { bottom: auto !important; top: 206px; font-size: 12px; }
     .modal { padding: 18px; }
     .card { flex-wrap: wrap; }
+  }
+
+  @media (max-height: 640px) and (max-width: 900px) {
+    .weather-row { display: none; }
+    #weather-hud { bottom: 88px; }
   }
 
   @media (max-width: 600px) {
@@ -377,6 +389,7 @@
     <button onclick="openModal('jobs-modal')">📋 Contracts</button>
     <button onclick="openModal('shop-modal')">🔧 Rig Shop</button>
     <button id="audio-btn" onclick="toggleAudio()">🔊 Audio</button>
+    <button id="music-btn" onclick="toggleMusic()" title="Toggle the lo-fi background music">🎵 Music</button>
   </div>
 </div>
 
@@ -454,6 +467,18 @@
 
 <script>
 // ================= AUDIO ENGINE =================
+// ---- procedural lo-fi soundtrack data ----
+const MUSIC_BPM = 72;
+const MUSIC_STEP = 60 / MUSIC_BPM / 4;             // one 16th note, seconds
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+const MUSIC_PROG = [                               // Am9 - Fmaj7 - Cmaj7(9) - G6
+  { root: 45, chord: [57, 60, 64, 67, 71] },
+  { root: 41, chord: [53, 57, 60, 64, 67] },
+  { root: 48, chord: [52, 55, 59, 62, 64] },
+  { root: 43, chord: [55, 59, 62, 64, 67] }
+];
+const MELODY_NOTES = [69, 72, 74, 76, 79, 81];     // A minor pentatonic
+
 class SoundEngine {
   constructor() {
     this.ctx = null;
@@ -461,6 +486,11 @@ class SoundEngine {
     this.filterNode = null;
     this.enabled = true;
     this.isSpraying = false;
+    this.musicOn = true;                 // Music toggle (Audio is the master mute)
+    try { if (localStorage.getItem('hydroblast2d.music') === '0') this.musicOn = false; } catch (e) {}
+    this.rain = 0; this.wind = 0;
+    this.musicTimer = null; this.musicStep = 0; this.musicSteps = 0; this.nextNoteTime = 0;
+    this.master = null; this.ambBus = null; this.musicBus = null;
   }
   init() {
     if (this.ctx) return;
@@ -487,7 +517,189 @@ class SoundEngine {
     this.filterNode.connect(this.gainNode);
     this.gainNode.connect(this.ctx.destination);
     noise.start();
+    this.initBuses();
   }
+  // Ambience (breeze, city hum, rain) and the lo-fi music loop each get their own bus into a shared master
+  initBuses() {
+    const c = this.ctx;
+    this.master = c.createGain();
+    this.master.gain.value = 1;
+    this.master.connect(c.destination);
+
+    const mkNoise = (secs, brown) => {
+      const buf = c.createBuffer(1, Math.floor(c.sampleRate * secs), c.sampleRate);
+      const d = buf.getChannelData(0);
+      let last = 0;
+      for (let i = 0; i < d.length; i++) {
+        const w = Math.random() * 2 - 1;
+        if (brown) { last = (last + 0.02 * w) / 1.02; d[i] = last * 3.5; } else d[i] = w;
+      }
+      return buf;
+    };
+    this.whiteBuf = mkNoise(3, false);
+    const brownBuf = mkNoise(3, true);
+    const loop = buf => { const sr = c.createBufferSource(); sr.buffer = buf; sr.loop = true; return sr; };
+    const filt = (type, f, q) => { const n = c.createBiquadFilter(); n.type = type; n.frequency.value = f; if (q) n.Q.value = q; return n; };
+    const lfo = (rate, depth, target) => { const o = c.createOscillator(); o.frequency.value = rate; const g = c.createGain(); g.gain.value = depth; o.connect(g); g.connect(target); o.start(); };
+
+    this.ambBus = c.createGain();
+    this.ambBus.gain.value = 0;
+    this.ambBus.connect(this.master);
+
+    // soft breeze: band-limited noise with slow gusting
+    const breeze = loop(this.whiteBuf), bp = filt('bandpass', 420, 0.7);
+    this.breezeGain = c.createGain(); this.breezeGain.gain.value = 0.03;
+    breeze.connect(bp); bp.connect(this.breezeGain); this.breezeGain.connect(this.ambBus);
+    lfo(0.07, 0.018, this.breezeGain.gain); lfo(0.05, 140, bp.frequency);
+    breeze.start();
+
+    // distant city hum
+    const city = loop(brownBuf), lp = filt('lowpass', 240);
+    this.cityGain = c.createGain(); this.cityGain.gain.value = 0.11;
+    city.connect(lp); lp.connect(this.cityGain); this.cityGain.connect(this.ambBus);
+    lfo(0.03, 0.03, this.cityGain.gain);
+    city.start();
+
+    // rain: broadband hiss plus a brighter patter layer (both silent until it rains)
+    const rain = loop(this.whiteBuf), rhp = filt('highpass', 900), rlp = filt('lowpass', 9000);
+    this.rainGain = c.createGain(); this.rainGain.gain.value = 0;
+    rain.connect(rhp); rhp.connect(rlp); rlp.connect(this.rainGain); this.rainGain.connect(this.ambBus);
+    rain.start();
+    const patter = loop(this.whiteBuf), pbp = filt('bandpass', 3500, 0.9);
+    this.rain2Gain = c.createGain(); this.rain2Gain.gain.value = 0;
+    patter.connect(pbp); pbp.connect(this.rain2Gain); this.rain2Gain.connect(this.ambBus);
+    patter.start(0, 1.3);
+
+    // music bus: lo-fi low-pass, plus a dotted-eighth echo for the melody
+    this.musicBus = c.createGain();
+    this.musicBus.gain.value = 0;
+    this.musicBus.connect(this.master);
+    this.musicFilter = filt('lowpass', 3600, 0.5);
+    this.musicFilter.connect(this.musicBus);
+    this.echo = c.createDelay(1.5);
+    this.echo.delayTime.value = MUSIC_STEP * 3;
+    const fb = c.createGain(); fb.gain.value = 0.33;
+    const wet = c.createGain(); wet.gain.value = 0.4;
+    this.echo.connect(fb); fb.connect(this.echo); this.echo.connect(wet); wet.connect(this.musicFilter);
+
+    this.applyMix(); this.applyWeather(); this.syncMusic();
+  }
+
+  // Audio = master mute for everything; Music = music only. Fades keep toggles click-free.
+  applyMix() {
+    if (!this.ctx || !this.ambBus) return;
+    const now = this.ctx.currentTime;
+    this.ambBus.gain.setTargetAtTime(this.enabled ? 1 : 0, now, 0.1);
+    this.musicBus.gain.setTargetAtTime(this.enabled && this.musicOn ? 0.8 : 0, now, 0.2);
+  }
+
+  setWeather(rain, wind) {
+    this.rain = rain; this.wind = wind;
+    this.applyWeather();
+  }
+
+  applyWeather() {
+    if (!this.ctx || !this.rainGain) return;
+    const now = this.ctx.currentTime;
+    this.rainGain.gain.setTargetAtTime(Math.min(0.2, this.rain * 0.3), now, 0.8);
+    this.rain2Gain.gain.setTargetAtTime(Math.min(0.1, this.rain * 0.15), now, 0.8);
+    this.breezeGain.gain.setTargetAtTime(0.03 + Math.min(1, Math.abs(this.wind)) * 0.1, now, 1.0);
+    this.cityGain.gain.setTargetAtTime(0.11 * (1 - Math.min(0.6, this.rain)), now, 1.0);
+  }
+
+  // Only runs the scheduler while music is actually wanted (no idle CPU when muted)
+  syncMusic() {
+    const want = !!(this.ctx && this.musicBus && this.enabled && this.musicOn);
+    if (want && !this.musicTimer) this.startMusic();
+    else if (!want && this.musicTimer) this.stopMusic();
+  }
+  startMusic() {
+    this.nextNoteTime = this.ctx.currentTime + 0.15;
+    this.musicTimer = setInterval(() => this.scheduleMusic(), 40);
+  }
+  stopMusic() {
+    clearInterval(this.musicTimer);
+    this.musicTimer = null;
+  }
+  scheduleMusic() {
+    const c = this.ctx;
+    if (!c || c.state !== 'running') { this.nextNoteTime = (c ? c.currentTime : 0) + 0.15; return; } // no catch-up burst after suspend / hidden tab
+    if (this.nextNoteTime < c.currentTime - 0.3) this.nextNoteTime = c.currentTime + 0.05;
+    while (this.nextNoteTime < c.currentTime + 0.3) {
+      this.playStep(this.musicStep, this.nextNoteTime);
+      this.nextNoteTime += MUSIC_STEP;
+      this.musicStep++; this.musicSteps++;
+    }
+  }
+  playStep(step, t) {
+    const bar = Math.floor(step / 16) % 4, s = step % 16, p = MUSIC_PROG[bar];
+    if (s === 0) this.musicPad(p.chord, t, MUSIC_STEP * 16);
+    if (s === 0 || s === 10) this.musicBass(p.root, t, s === 0 ? 1 : 0.7);
+    if (s === 0 || s === 10 || (s === 7 && Math.random() < 0.5)) this.musicKick(t);
+    if (s === 4 || s === 12) this.musicSnare(t);
+    if (s % 2 === 0) this.musicHat(t + (s % 4 === 2 ? 0.035 : 0), s === 14 && Math.random() < 0.35, 0.6 + Math.random() * 0.4);
+    if ([2, 6, 8, 11, 14].includes(s) && Math.random() < 0.3) this.musicPluck(MELODY_NOTES[Math.floor(Math.random() * MELODY_NOTES.length)], t);
+    if (Math.random() < 0.07) this.musicCrackle(t);
+  }
+  musicPad(chord, t, dur) {
+    const c = this.ctx, lp = c.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 1300; lp.connect(this.musicFilter);
+    for (const m of chord) {
+      for (const det of [-7, 7]) {
+        const o = c.createOscillator(), g = c.createGain();
+        o.type = 'triangle'; o.frequency.value = mtof(m); o.detune.value = det;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(0.017, t + 0.4);
+        g.gain.setTargetAtTime(0, t + dur * 0.9, 0.25);
+        o.connect(g); g.connect(lp);
+        o.start(t); o.stop(t + dur + 1.5);
+      }
+    }
+  }
+  musicBass(root, t, vel) {
+    const c = this.ctx, o = c.createOscillator(), g = c.createGain(), lp = c.createBiquadFilter();
+    o.type = 'sine'; o.frequency.value = mtof(root);
+    lp.type = 'lowpass'; lp.frequency.value = 500;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.2 * vel, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+    o.connect(lp); lp.connect(g); g.connect(this.musicFilter);
+    o.start(t); o.stop(t + 0.55);
+  }
+  musicKick(t) {
+    const c = this.ctx, o = c.createOscillator(), g = c.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(130, t);
+    o.frequency.exponentialRampToValueAtTime(42, t + 0.13);
+    g.gain.setValueAtTime(0.34, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+    o.connect(g); g.connect(this.musicFilter);
+    o.start(t); o.stop(t + 0.27);
+  }
+  noiseHit(t, type, freq, q, peak, decay, len) {
+    const c = this.ctx, src = c.createBufferSource(), f = c.createBiquadFilter(), g = c.createGain();
+    src.buffer = this.whiteBuf;
+    f.type = type; f.frequency.value = freq; if (q) f.Q.value = q;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.001, t + decay);
+    src.connect(f); f.connect(g); g.connect(this.musicFilter);
+    src.start(t, Math.random() * 2, len);
+  }
+  musicSnare(t) { this.noiseHit(t, 'bandpass', 1800, 0.8, 0.17, 0.16, 0.2); }
+  musicHat(t, open, vel) { this.noiseHit(t, 'highpass', 7000, 0, 0.035 * vel, open ? 0.22 : 0.05, 0.3); }
+  musicCrackle(t) { this.noiseHit(t, 'highpass', 3000, 0, 0.022, 0.02, 0.05); }
+  musicPluck(m, t) {
+    const c = this.ctx, o = c.createOscillator(), g = c.createGain(), send = c.createGain();
+    o.type = 'triangle'; o.frequency.value = mtof(m);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.07, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+    send.gain.value = 0.55;
+    o.connect(g); g.connect(this.musicFilter); g.connect(send); send.connect(this.echo);
+    o.start(t); o.stop(t + 0.75);
+  }
+
   // Create / resume the context from inside a user gesture (required by mobile browsers)
   unlock() {
     if (!this.ctx) this.init();
@@ -498,6 +710,7 @@ class SoundEngine {
       src.connect(this.ctx.destination);
       src.start(0);
     } catch (e) {}
+    this.applyMix(); this.syncMusic();
   }
   setSpray(active, nozzle) {
     if (!this.enabled) return;
@@ -659,10 +872,28 @@ function startGame(resume) {
   }
 }
 
+function updateAudioButtons() {
+  document.getElementById('audio-btn').textContent = sound.enabled ? '🔊 Audio' : '🔇 Muted';
+  const mb = document.getElementById('music-btn');
+  mb.textContent = sound.musicOn ? '🎵 Music' : '🎵 Off';
+  mb.classList.toggle('active', sound.musicOn && sound.enabled);
+}
+
 function toggleAudio() {
   sound.enabled = !sound.enabled;
   if (!sound.enabled && sound.gainNode) { sound.gainNode.gain.value = 0; sound.isSpraying = false; }
-  document.getElementById('audio-btn').textContent = sound.enabled ? '🔊 Audio' : '🔇 Muted';
+  updateAudioButtons();
+  sound.applyMix();
+  sound.syncMusic();
+}
+
+function toggleMusic() {
+  sound.musicOn = !sound.musicOn;
+  try { localStorage.setItem('hydroblast2d.music', sound.musicOn ? '1' : '0'); } catch (e) {}
+  updateAudioButtons();
+  sound.unlock();          // a click is a gesture, so make sure the context is live
+  sound.applyMix();
+  sound.syncMusic();
 }
 
 // ================= GAME DATA & CONFIG =================
@@ -686,6 +917,7 @@ const PROJECTS = [
     id: 'office3story',
     name: '3-Story Apex Office Complex',
     client: 'Apex Commercial Realty',
+    difficulty: 'Rookie',
     totalReward: 1250,
     stages: [
       {
@@ -722,6 +954,7 @@ const PROJECTS = [
     id: 'plaza',
     name: 'Riverwalk Amphitheater Plaza',
     client: 'Metro Parks Dept.',
+    difficulty: 'Standard',
     totalReward: 890,
     stages: [
       {
@@ -741,6 +974,75 @@ const PROJECTS = [
         dirtType: 'facade_upper',
         skyFrac: 0.18, // top 18% of the screen is open sky above the roofline
         drawClean: drawClocktowerClean,
+        completed: false
+      }
+    ]
+  },
+  {
+    id: 'fleetyard',
+    name: 'Metro Transit Fleet Yard',
+    client: 'Metro Transit Authority',
+    difficulty: 'Veteran',
+    totalReward: 1450,
+    stages: [
+      {
+        id: 'bus',
+        name: 'Stage 1: Heavy-Duty Municipal Bus',
+        desc: 'Painted aluminium panels, big passenger glass and a chrome bumper — caked with diesel soot and road tar at the wheel wells. Foam the crust, keep the red jet off the windows.',
+        reward: 650,
+        dirtType: 'facade_bus',
+        diff: { hardAdd: 0.12, spotMul: 1.2, spotKind: 1 },
+        classify: busClassify,
+        setup: setupBus,
+        drawClean: drawBusClean,
+        completed: false
+      },
+      {
+        id: 'fuelbay',
+        name: 'Stage 2: Fueling Bay & Oil Apron',
+        desc: 'Dense engine-oil spills and baked-on tire rubber. Pre-soak with foam, then rinse with the 25° or blast spots with the 15° / 0°. Pump housings and displays are delicate.',
+        reward: 800,
+        dirtType: 'walkway_apron',
+        diff: { hardAdd: 0.05, spotMul: 1.0, spotKind: 4 },
+        classify: fuelClassify,
+        setup: setupFuelBay,
+        drawClean: drawFuelBayClean,
+        completed: false
+      }
+    ]
+  },
+  {
+    id: 'resort',
+    name: 'Grand Resort Pool & Graffiti Wall',
+    client: 'Grand Resort & Spa',
+    difficulty: 'Master',
+    totalReward: 2100,
+    stages: [
+      {
+        id: 'pooldeck',
+        name: 'Stage 1: Travertine Pool Deck',
+        desc: 'Sun-baked calcium scale, sunscreen residue and green algae around the tiled pool edge. The humid air keeps the algae coming back.',
+        reward: 950,
+        dirtType: 'walkway_pool',
+        diff: { hardAdd: 0.25, spotMul: 0.5, spotKind: 6 },
+        forceWeather: 1,
+        classify: poolClassify,
+        setup: setupPoolDeck,
+        drawClean: drawPoolDeckClean,
+        completed: false
+      },
+      {
+        id: 'courtyard',
+        name: 'Stage 2: Storm-Weathered Courtyard & Mural',
+        desc: 'Thick layered spray-paint graffiti and stubborn moss on brick and stucco — in a driving rainstorm that washes your foam away fast. Foam, then rinse right behind it.',
+        reward: 1150,
+        dirtType: 'facade_courtyard',
+        skyFrac: 0.1,
+        diff: { hardAdd: 0.1, spotMul: 0.6, spotKind: 3 },
+        forceWeather: 3,
+        classify: courtClassify,
+        setup: setupCourtyard,
+        drawClean: drawCourtyardClean,
         completed: false
       }
     ]
@@ -771,6 +1073,7 @@ let state = {
   particles: [],
   rain: [],
   stageTime: 0,
+  weatherLocked: false,
   stats: { etchedCells: 0, incidents: 0, repairPenalty: 0, lastIncident: -99 },
   pendingResults: null
 };
@@ -803,13 +1106,25 @@ const MATERIALS = {
   STONE: { id: 0, name: 'brick/stone/concrete', roughness: 0.80, adhesion: 1.0,  hardMul: 1.0, streakCap: 0.30 },
   AIR:   { id: 3, name: 'open sky',             roughness: 0.50, adhesion: 0.0,  hardMul: 0.0, streakCap: 0.0 },
   GLASS: { id: 1, name: 'glass',                roughness: 0.25, adhesion: 0.35, hardMul: 0.6, streakCap: 0.45 },
-  TRIM:  { id: 2, name: 'metal/painted trim',   roughness: 0.30, adhesion: 0.5,  hardMul: 0.8, streakCap: 0.40 }
+  TRIM:  { id: 2, name: 'metal/painted trim',   roughness: 0.30, adhesion: 0.5,  hardMul: 0.8, streakCap: 0.40 },
+  PAINT: { id: 4, name: 'painted aluminium',    roughness: 0.35, adhesion: 0.55, hardMul: 0.85, streakCap: 0.40 },
+  TILE:  { id: 5, name: 'glazed pool tile',     roughness: 0.30, adhesion: 0.45, hardMul: 0.85, streakCap: 0.40 },
+  TRAVERTINE: { id: 6, name: 'travertine deck', roughness: 0.85, adhesion: 1.1,  hardMul: 1.15, streakCap: 0.30 },
+  STUCCO: { id: 7, name: 'stucco',              roughness: 0.90, adhesion: 1.05, hardMul: 1.05, streakCap: 0.30 }
 };
-const MATERIAL_LIST = [MATERIALS.STONE, MATERIALS.GLASS, MATERIALS.TRIM, MATERIALS.AIR];
+const MATERIAL_LIST = [MATERIALS.STONE, MATERIALS.GLASS, MATERIALS.TRIM, MATERIALS.AIR, MATERIALS.PAINT, MATERIALS.TILE, MATERIALS.TRAVERTINE, MATERIALS.STUCCO];
 const AIR_ID = MATERIALS.AIR.id;
-const FRAGILE = [0, 0.45, 0.55, 0];            // chip threshold by material id (0 = cannot be damaged)
-const MATERIAL_CUT = [1.0, 0.75, 0.85, 1.0];   // grime cutting-threshold multiplier by material id
-const STAGE_PAR = { walkway: 140, facade_lower: 85, facade_upper: 70, promenade: 140, clocktower: 70 }; // seconds @1280x720
+const FRAGILE = [0, 0.45, 0.55, 0, 0.8, 0, 0, 0];   // chip threshold by material id (0 = cannot be damaged); paint only scuffs under the 0deg jet
+const MATERIAL_CUT = [1.0, 0.75, 0.85, 1.0, 0.9, 0.85, 1.05, 1.0]; // grime cutting-threshold multiplier by material id
+
+// Stubborn grime kinds (stored per cell in grid.stubborn): extra cutting threshold, hardness floor, look
+// 1 gum/tar  2 graffiti  3 moss  4 engine oil  5 tire rubber  6 sunscreen  7 pool algae  8 calcium scale
+const KIND_THR   = [0, 0.20, 0.20, 0.05, 0.30, 0.25, 0.10, 0.05, 0.25];
+const KIND_FLOOR = [0, 0.55, 0.50, 0.35, 0.60, 0.60, 0.30, 0.20, 0.60];
+const KIND_ALPHA = [0, 0.97, 0.97, 0.92, 0.95, 0.97, 0.82, 0.80, 0.92];
+const KIND_RGB = [null, [14, 11, 9], [0, 0, 0], [30, 66, 26], [22, 18, 36], [10, 10, 12], [214, 196, 150], [46, 112, 62], [232, 228, 212]];
+const GRAFFITI_PAL = [[239, 68, 68], [250, 204, 21], [56, 189, 248], [217, 70, 239], [34, 197, 94], [249, 115, 22]];
+const STAGE_PAR = { walkway: 140, facade_lower: 85, facade_upper: 70, promenade: 140, clocktower: 70, bus: 140, fuelbay: 260, pooldeck: 180, courtyard: 300 }; // seconds @1280x720
   // sky cells never hold grime, water or foam and don't count for completion
 
 // Infer the material from the clean artwork colour so physics follows the picture.
@@ -823,7 +1138,7 @@ function classifyMaterial(r, g, b, isFacade) {
 }
 
 class FluidGrimeGrid {
-  constructor(w, h, isVertical, srcCtx, skyFrac = 0) {
+  constructor(w, h, isVertical, srcCtx, skyFrac = 0, stage = null) {
     this.gw = Math.ceil(w / GRID_SCALE);
     this.gh = Math.ceil(h / GRID_SCALE);
     this.size = this.gw * this.gh;
@@ -844,7 +1159,8 @@ class FluidGrimeGrid {
     this.streakCap = new Float32Array(this.size); // Max grime that runoff can redeposit
     this.cooldown = new Float32Array(this.size);  // Post-clean regrowth grace (seconds)
     this.damage = new Float32Array(this.size);    // Surface etching on glass / trim (>=0.5 = chipped)
-    this.stubborn = new Uint8Array(this.size);    // Gum / oil spots: extra cutting threshold
+    this.stubborn = new Uint8Array(this.size);    // Stubborn grime kind (see KIND_* tables), 0 = ordinary grime
+    this.tint = new Uint8Array(this.size);        // Graffiti colour index
     this.cracks = [];                             // Crack stars drawn over chipped areas
     this.damageDirty = false;
 
@@ -861,21 +1177,25 @@ class FluidGrimeGrid {
     this.scanRT = mk();
     this.dmgRT = mk();
 
-    this.initMaterialMap(srcCtx, w, h, skyFrac);
+    this.initMaterialMap(srcCtx, w, h, skyFrac, stage);
   }
 
-  initMaterialMap(srcCtx, w, h, skyFrac) {
+  initMaterialMap(srcCtx, w, h, skyFrac, stage) {
     const skyRows = Math.floor((skyFrac * h) / GRID_SCALE);
+    const diff = (stage && stage.diff) || {};
+    const hardAdd = diff.hardAdd || 0;
     let img = null;
-    try { if (srcCtx) img = srcCtx.getImageData(0, 0, w, h).data; } catch (e) { img = null; }
+    try { if (srcCtx && !(stage && stage.classify)) img = srcCtx.getImageData(0, 0, w, h).data; } catch (e) { img = null; }
     for (let y = 0; y < this.gh; y++) {
       for (let x = 0; x < this.gw; x++) {
         const i = y * this.gw + x;
         const normY = y / this.gh;
         // Material comes from the artwork under this cell
         let mat = MATERIALS.STONE;
-        if (img) {
-          const px = Math.min(w - 1, x * GRID_SCALE + 2), py = Math.min(h - 1, y * GRID_SCALE + 2);
+        const px = Math.min(w - 1, x * GRID_SCALE + 2), py = Math.min(h - 1, y * GRID_SCALE + 2);
+        if (stage && stage.classify) {
+          mat = stage.classify(px, py, w, h);            // hand-authored geometry map for this stage
+        } else if (img) {
           const o = (py * w + px) * 4;
           mat = classifyMaterial(img[o], img[o + 1], img[o + 2], this.isVertical);
         }
@@ -888,32 +1208,52 @@ class FluidGrimeGrid {
         // Base Grime & Hardness initialization
         const isAir = mat.id === AIR_ID;
         this.grime[i] = isAir ? 0 : 0.85 + Math.random() * 0.15;
-        this.hardness[i] = isAir ? 0 : (0.5 + Math.random() * 0.3) * mat.hardMul;
+        this.hardness[i] = isAir ? 0 : Math.min(1, (0.5 + Math.random() * 0.3) * mat.hardMul + hardAdd);
         this.moisture[i] = isAir ? 0 : 0.1;
         // Sun exposure: brighter toward the top, with some random shade
         this.sun[i] = Math.max(0, Math.min(1, 0.2 + (1 - normY) * 0.5 + Math.random() * 0.3));
       }
     }
-    // Chewing-gum / oil spots: ~3% of the surface, hardest crust, can't be fully softened
-    const spots = Math.floor(this.size / 1000);
+    // Stubborn spots (gum, tar, oil...): density and kind depend on the stage
+    const spots = Math.floor((this.size / 1000) * (diff.spotMul !== undefined ? diff.spotMul : 1));
+    const spotKind = diff.spotKind || 1;
     for (let k = 0; k < spots; k++) {
-      const cx = Math.floor(Math.random() * this.gw), cy = Math.floor(Math.random() * this.gh);
       const r = 2 + Math.floor(Math.random() * 3);
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          const x = cx + dx, y = cy + dy;
-          if (x < 0 || y < 0 || x >= this.gw || y >= this.gh || dx * dx + dy * dy > r * r + 1) continue;
-          const i = y * this.gw + x;
-          if (this.material[i] === AIR_ID) continue;
-          this.stubborn[i] = 1;
-          this.grime[i] = 1;
-          this.hardness[i] = 1;
-        }
-      }
+      this.placeBlob(Math.random() * this.gw * GRID_SCALE, Math.random() * this.gh * GRID_SCALE, r * GRID_SCALE, spotKind);
     }
 
     this.initialGrime = 0;
     for (let i = 0; i < this.size; i++) this.initialGrime += this.grime[i];
+  }
+
+  recomputeInitial() {
+    let t = 0;
+    for (let i = 0; i < this.size; i++) t += this.grime[i];
+    this.initialGrime = t;
+  }
+
+  // Paint one cell with a stubborn kind (never on open sky or windows)
+  setKind(i, kind, tint = -1) {
+    const m = this.material[i];
+    if (m === AIR_ID || m === MATERIALS.GLASS.id) return;
+    this.stubborn[i] = kind;
+    this.grime[i] = 1;
+    this.hardness[i] = 1;
+    this.tint[i] = tint >= 0 ? tint : Math.floor(hash2(i % this.gw, Math.floor(i / this.gw), 3) * 6);
+    if (kind === 3) this.adhesion[i] = 3;        // moss re-establishes quickly
+    else if (kind === 7) this.adhesion[i] = 2.5; // pool algae likewise
+  }
+
+  // Ragged blob of a stubborn kind at pixel coordinates
+  placeBlob(cxPx, cyPx, rPx, kind, tint = -1) {
+    const cx = cxPx / GRID_SCALE, cy = cyPx / GRID_SCALE, r = Math.max(1, rPx / GRID_SCALE);
+    for (let y = Math.floor(cy - r * 1.3); y <= Math.ceil(cy + r * 1.3); y++) {
+      for (let x = Math.floor(cx - r * 1.3); x <= Math.ceil(cx + r * 1.3); x++) {
+        if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) continue;
+        const dx = x - cx, dy = y - cy, rr = r * (0.75 + 0.5 * hash2(x, y, 7));
+        if (dx * dx + dy * dy <= rr * rr) this.setKind(y * this.gw + x, kind, tint);
+      }
+    }
   }
 
   step(dt, weather) {
@@ -948,7 +1288,7 @@ class FluidGrimeGrid {
           this.grime[i] -= d;
           if (this.grime[i] < 0.05) this.cooldown[i] = CLEAN_GRACE;
         }
-        this.foam[i] = Math.max(0, this.foam[i] - (0.01 + rainRate * 0.15) * dt);
+        this.foam[i] = Math.max(0, this.foam[i] - (0.01 + rainRate * 0.08) * dt);
       }
 
       // Baking vs Softening
@@ -956,7 +1296,7 @@ class FluidGrimeGrid {
         this.hardness[i] = Math.min(1, this.hardness[i] + 0.005 * dt); // slow baking in dry heat
       } else if (this.moisture[i] > 0.6) {
         // Plain water / rain only softens crust slowly; foam is the real pre-soak
-        this.hardness[i] = Math.max(this.stubborn[i] ? 0.55 : 0, this.hardness[i] - 0.02 * dt);
+        this.hardness[i] = Math.max(KIND_FLOOR[this.stubborn[i]], this.hardness[i] - 0.02 * dt);
       }
     }
 
@@ -1002,7 +1342,7 @@ class FluidGrimeGrid {
         const evap = Math.min(this.water[i], evapRate * dt);
         this.water[i] -= evap;
         if (this.water[i] < 0.05 && this.sediment[i] > 0) {
-          const depositRate = 0.5 * (1 - this.foam[i]); // Foam prevents redeposition
+          const depositRate = 0.5 * (1 - this.foam[i]) * Math.max(0, 1 - rainRate * 2.5); // foam and heavy rain both stop redeposition
           // Streaks are light and capped so runoff can't undo a cleaned area
           const room = Math.max(0, this.streakCap[i] - this.grime[i]);
           const deposit = Math.min(this.sediment[i] * depositRate, room);
@@ -1058,10 +1398,10 @@ class FluidGrimeGrid {
           if (isSoapOverride) {
             this.foam[i] = Math.min(1, this.foam[i] + falloff * 0.8);
             // Surfactant softens baked-on crust (stronger with the chem injector); gum keeps a hard core
-            this.hardness[i] = Math.max(this.stubborn[i] ? 0.55 : 0, this.hardness[i] - falloff * 0.03 * soapLevel);
+            this.hardness[i] = Math.max(KIND_FLOOR[this.stubborn[i]], this.hardness[i] - falloff * 0.03 * soapLevel);
           } else {
             // Cutting needs a minimum power that rises with hardness; gum / oil spots add more
-            const threshold = (0.25 + 0.55 * this.hardness[i]) * MATERIAL_CUT[this.material[i]] + (this.stubborn[i] ? 0.2 : 0);
+            const threshold = (0.25 + 0.55 * this.hardness[i]) * MATERIAL_CUT[this.material[i]] + KIND_THR[this.stubborn[i]];
             const foamBoost = this.foam[i] > 0.5 ? 1.6 + (soapLevel - 1) * 0.3 : 1.0;
             const effectivePSI = nozzlePower * psiBonus * foamBoost * 1.1; // wet-surface bonus
 
@@ -1070,9 +1410,9 @@ class FluidGrimeGrid {
               const detached = Math.min(this.grime[i], removeAmount);
               this.grime[i] -= detached;
               if (this.grime[i] < 0.05) this.cooldown[i] = CLEAN_GRACE;
-              this.sediment[i] += detached * 0.9; // Suspended in water
+              this.sediment[i] += detached * (this.stubborn[i] ? 0.3 : 0.9); // dissolved oil / paint doesn't redeposit as mud
             }
-            this.foam[i] = Math.max(0, this.foam[i] - falloff * 0.15); // clear-water rinse strips foam
+            this.foam[i] = Math.max(0, this.foam[i] - falloff * 0.09); // clear-water rinse strips foam
           }
         }
       }
@@ -1181,8 +1521,13 @@ class FluidGrimeGrid {
         const gr = this.grime[i];
         if (gr > 0.05) {
           const green = this.moisture[i] > 0.5 && (((gx * 73856093) ^ (gy * 19349663)) >>> 0) % 10 > 3;
-          d[i] = this.stubborn[i] ? packRGBA(14, 11, 9, 0.97)           // gum / oil: near-black
-               : green ? packRGBA(34, 65, 20, gr * 0.85) : packRGBA(55, 45, 32, gr * 0.9);
+          const kd = this.stubborn[i];
+          if (kd) {
+            const col = kd === 2 ? GRAFFITI_PAL[this.tint[i] % GRAFFITI_PAL.length] : KIND_RGB[kd];
+            d[i] = packRGBA(col[0], col[1], col[2], Math.min(KIND_ALPHA[kd], 0.2 + gr)); // fades as it is stripped
+          } else {
+            d[i] = green ? packRGBA(34, 65, 20, gr * 0.85) : packRGBA(55, 45, 32, gr * 0.9);
+          }
         }
 
         // Soap foam, then runoff (blue water -> brown mud) composited over it
@@ -1717,11 +2062,354 @@ function drawClocktowerClean(c, w, h) {
   c.stroke();
 }
 
+// ================= NEW CONTRACTS: ARTWORK, MATERIAL MAPS & HAZARD PLACEMENT =================
+const _layoutCache = {};
+function cached(key, fn) { return _layoutCache[key] || (_layoutCache[key] = fn()); }
+function inBox(px, py, x, y, w, h) { return px >= x && px <= x + w && py >= y && py <= y + h; }
+
+function hash2(x, y, s) {
+  let h = (Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(s | 0, 1013904223)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y, scale, seed) { // smooth value noise, 0..1
+  const fx = x / scale, fy = y / scale, x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const tx = fx - x0, ty = fy - y0, sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+  const a = hash2(x0, y0, seed), b = hash2(x0 + 1, y0, seed), c = hash2(x0, y0 + 1, seed), d = hash2(x0 + 1, y0 + 1, seed);
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
+
+// ---------- Contract 3, Stage 1: Heavy-duty municipal bus ----------
+function busLayout(w, h) {
+  return cached('bus' + w + 'x' + h, () => {
+    const bx = w * 0.04, bw = w * 0.92, by = h * 0.15, bh = h * 0.62, y2 = by + bh;
+    const ww = bw * 0.1, gap = bw * 0.015, x0 = bx + bw * 0.04, winY = by + bh * 0.12, winH = bh * 0.36;
+    const wins = [];
+    for (let i = 0; i < 6; i++) wins.push([x0 + i * (ww + gap), winY, ww, winH]);
+    wins.push([x0 + 6 * (ww + gap), winY, bw * 0.085, bh * 0.58]);      // passenger door glass
+    wins.push([bx + bw * 0.87, by + bh * 0.1, bw * 0.095, bh * 0.4]);   // windshield
+    const wr = bh * 0.14;
+    const wheels = [bx + bw * 0.2, bx + bw * 0.76].map(x => ({ x, y: y2 - bh * 0.015, r: wr }));
+    return { bx, bw, by, bh, y2, wins, wheels, groundY: y2 + bh * 0.125 };
+  });
+}
+
+function busClassify(px, py, w, h) {
+  const L = busLayout(w, h);
+  for (const r of L.wins) if (inBox(px, py, r[0], r[1], r[2], r[3])) return MATERIALS.GLASS;      // delicate
+  for (const wh of L.wheels) {
+    const d = Math.hypot(px - wh.x, py - wh.y);
+    if (d < wh.r * 0.5) return MATERIALS.TRIM;                       // chrome hub
+    if (d < wh.r) return MATERIALS.STONE;                            // rubber tire
+    if (d < wh.r * 1.28 && py < L.y2) return MATERIALS.PAINT;        // wheel-well liner
+  }
+  if (inBox(px, py, L.bx, L.by, L.bw, L.bh)) return py >= L.y2 - L.bh * 0.07 ? MATERIALS.TRIM : MATERIALS.PAINT; // chrome bumper / painted aluminum
+  return MATERIALS.STONE;                                            // depot wall and asphalt
+}
+
+function drawBusClean(c, w, h) {
+  const L = busLayout(w, h);
+  c.save();
+  const wall = c.createLinearGradient(0, 0, 0, L.groundY);
+  wall.addColorStop(0, '#475569'); wall.addColorStop(1, '#64748b');
+  c.fillStyle = wall; c.fillRect(0, 0, w, L.groundY);
+  c.strokeStyle = 'rgba(15,23,42,0.35)'; c.lineWidth = 3;
+  for (let x = w / 7; x < w; x += w / 7) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, L.groundY); c.stroke(); }
+  c.fillStyle = '#1f2937'; c.fillRect(0, L.groundY, w, h - L.groundY);
+  const ly = L.groundY + (h - L.groundY) * 0.6;
+  c.strokeStyle = '#eab308'; c.lineWidth = Math.max(4, h * 0.008); c.setLineDash([h * 0.05, h * 0.04]);
+  c.beginPath(); c.moveTo(0, ly); c.lineTo(w, ly); c.stroke(); c.setLineDash([]);
+
+  // painted aluminium body, livery stripes and lettering
+  const body = c.createLinearGradient(0, L.by, 0, L.y2);
+  body.addColorStop(0, '#f8fafc'); body.addColorStop(1, '#cbd5e1');
+  c.fillStyle = body; c.beginPath(); c.roundRect(L.bx, L.by, L.bw, L.bh, L.bh * 0.06); c.fill();
+  c.fillStyle = '#1d4ed8'; c.fillRect(L.bx, L.by + L.bh * 0.62, L.bw, L.bh * 0.12);
+  c.fillStyle = '#f97316'; c.fillRect(L.bx, L.by + L.bh * 0.76, L.bw, L.bh * 0.025);
+  c.fillStyle = '#f8fafc'; c.font = `800 ${Math.round(L.bh * 0.085)}px system-ui, sans-serif`;
+  c.textAlign = 'left'; c.textBaseline = 'middle';
+  c.fillText('METRO TRANSIT  ·  ROUTE 42', L.bx + L.bw * 0.05, L.by + L.bh * 0.68);
+
+  // chrome bumper, then wheel arches and wheels over it
+  const bump = c.createLinearGradient(0, L.y2 - L.bh * 0.07, 0, L.y2);
+  bump.addColorStop(0, '#f1f5f9'); bump.addColorStop(0.5, '#94a3b8'); bump.addColorStop(1, '#e2e8f0');
+  c.fillStyle = bump; c.fillRect(L.bx, L.y2 - L.bh * 0.07, L.bw, L.bh * 0.07);
+  c.fillStyle = '#111827';
+  for (const wh of L.wheels) { c.beginPath(); c.arc(wh.x, wh.y, wh.r * 1.28, Math.PI, 0); c.fill(); }
+
+  // passenger glass
+  L.wins.forEach(([x, y, ww, hh], i) => {
+    c.fillStyle = '#0f172a'; c.fillRect(x - 4, y - 4, ww + 8, hh + 8);
+    const g = c.createLinearGradient(x, y, x + ww, y + hh);
+    g.addColorStop(0, '#7dd3fc'); g.addColorStop(0.5, '#38bdf8'); g.addColorStop(1, '#0369a1');
+    c.fillStyle = g; c.fillRect(x, y, ww, hh);
+    c.fillStyle = 'rgba(255,255,255,0.22)';
+    c.beginPath(); c.moveTo(x + ww * 0.55, y); c.lineTo(x + ww * 0.8, y); c.lineTo(x + ww * 0.3, y + hh); c.lineTo(x + ww * 0.05, y + hh); c.closePath(); c.fill();
+    if (i === 6) { c.strokeStyle = '#0f172a'; c.lineWidth = 4; c.beginPath(); c.moveTo(x + ww / 2, y); c.lineTo(x + ww / 2, y + hh); c.stroke(); }
+  });
+
+  for (const wh of L.wheels) {
+    c.fillStyle = '#0b0f19'; c.beginPath(); c.arc(wh.x, wh.y, wh.r, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#cbd5e1'; c.beginPath(); c.arc(wh.x, wh.y, wh.r * 0.5, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#475569';
+    for (let k = 0; k < 5; k++) { const a = k * Math.PI * 2 / 5; c.beginPath(); c.arc(wh.x + Math.cos(a) * wh.r * 0.28, wh.y + Math.sin(a) * wh.r * 0.28, wh.r * 0.05, 0, Math.PI * 2); c.fill(); }
+  }
+  c.restore();
+}
+
+function setupBus(g, w, h) {
+  const L = busLayout(w, h);
+  for (const wh of L.wheels) {
+    for (let k = 0; k < 26; k++) { // road tar flung up around the wheel wells
+      const ang = Math.PI * (1.05 + Math.random() * 0.9), dist = wh.r * (1.0 + Math.random() * 0.9);
+      g.placeBlob(wh.x + Math.cos(ang) * dist, wh.y + Math.sin(ang) * dist, 5 + Math.random() * 12, 1);
+    }
+    // baked-on soot band around each wheel well
+    for (let y = Math.floor((wh.y - wh.r * 1.8) / GRID_SCALE); y < Math.floor(L.y2 / GRID_SCALE); y++) {
+      for (let x = Math.floor((wh.x - wh.r * 2) / GRID_SCALE); x < Math.floor((wh.x + wh.r * 2) / GRID_SCALE); x++) {
+        if (x < 0 || y < 0 || x >= g.gw || y >= g.gh) continue;
+        const i = y * g.gw + x, m = g.material[i];
+        if (m !== AIR_ID && m !== MATERIALS.GLASS.id) g.hardness[i] = Math.min(1, g.hardness[i] + 0.2);
+      }
+    }
+  }
+  for (let k = 0; k < 10; k++) { // diesel exhaust streaking at the rear of the bus
+    g.placeBlob(L.bx + L.bw * (0.01 + Math.random() * 0.1), L.by + L.bh * (0.45 + Math.random() * 0.4), 8 + Math.random() * 14, 1);
+  }
+}
+
+// ---------- Contract 3, Stage 2: Fueling bay & oil apron ----------
+function fuelLayout(w, h) {
+  return cached('fuel' + w + 'x' + h, () => {
+    const islands = [{ x: w * 0.16, y: h * 0.16, w: w * 0.08, h: h * 0.54 }, { x: w * 0.76, y: h * 0.16, w: w * 0.08, h: h * 0.54 }];
+    const pumps = [];
+    for (const is of islands) for (const fy of [0.2, 0.62]) pumps.push({ x: is.x + is.w * 0.18, y: is.y + is.h * fy, w: is.w * 0.64, h: is.h * 0.2 });
+    const lt = Math.max(6, h * 0.014);
+    const lines = [[w * 0.05, h * 0.8, w * 0.9, lt], [w * 0.37, h * 0.08, lt, h * 0.72], [w * 0.63, h * 0.08, lt, h * 0.72]];
+    return { islands, pumps, lines, drain: [w * 0.46, h * 0.42, w * 0.08, h * 0.07] };
+  });
+}
+
+function fuelClassify(px, py, w, h) {
+  const L = fuelLayout(w, h);
+  for (const p of L.pumps) {
+    if (inBox(px, py, p.x + p.w * 0.15, p.y + p.h * 0.12, p.w * 0.7, p.h * 0.3)) return MATERIALS.GLASS; // pump display
+    if (inBox(px, py, p.x, p.y, p.w, p.h)) return MATERIALS.TRIM;                                      // metal pump housing
+  }
+  if (inBox(px, py, ...L.drain)) return MATERIALS.TRIM;
+  for (const l of L.lines) if (inBox(px, py, ...l)) return MATERIALS.PAINT;                           // painted safety lines
+  return MATERIALS.STONE;
+}
+
+function drawFuelBayClean(c, w, h) {
+  const L = fuelLayout(w, h);
+  c.save();
+  c.fillStyle = '#9ca3af'; c.fillRect(0, 0, w, h);
+  for (let i = 0; i < 5000; i++) { c.fillStyle = i % 2 ? 'rgba(255,255,255,0.12)' : 'rgba(71,85,105,0.14)'; c.fillRect(Math.random() * w, Math.random() * h, 2.5, 2.5); }
+  c.strokeStyle = '#6b7280'; c.lineWidth = 3;
+  for (let x = 0; x < w; x += w / 8) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, h); c.stroke(); }
+  for (let y = 0; y < h; y += h / 5) { c.beginPath(); c.moveTo(0, y); c.lineTo(w, y); c.stroke(); }
+  for (const is of L.islands) {
+    c.fillStyle = '#6b7280'; c.fillRect(is.x, is.y, is.w, is.h);
+    c.strokeStyle = '#eab308'; c.lineWidth = 5; c.strokeRect(is.x, is.y, is.w, is.h);
+  }
+  for (const p of L.pumps) {
+    c.fillStyle = '#dc2626'; c.fillRect(p.x, p.y, p.w, p.h);
+    c.fillStyle = '#7f1d1d'; c.fillRect(p.x, p.y + p.h * 0.75, p.w, p.h * 0.25);
+    c.fillStyle = '#0f172a'; c.fillRect(p.x + p.w * 0.15, p.y + p.h * 0.12, p.w * 0.7, p.h * 0.3);
+    c.fillStyle = '#34d399'; c.fillRect(p.x + p.w * 0.22, p.y + p.h * 0.2, p.w * 0.56, p.h * 0.14);
+  }
+  c.fillStyle = '#eab308';
+  for (const l of L.lines) c.fillRect(l[0], l[1], l[2], l[3]);
+  const [dx, dy, dw, dh] = L.drain;
+  c.fillStyle = '#1f2937'; c.fillRect(dx, dy, dw, dh);
+  c.strokeStyle = '#9ca3af'; c.lineWidth = 3;
+  for (let k = 1; k < 8; k++) { c.beginPath(); c.moveTo(dx + dw * k / 8, dy); c.lineTo(dx + dw * k / 8, dy + dh); c.stroke(); }
+  c.fillStyle = 'rgba(248,250,252,0.55)'; c.font = `800 ${Math.round(h * 0.05)}px system-ui, sans-serif`; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('FUELING BAY 3', w * 0.5, h * 0.9);
+  c.restore();
+}
+
+function setupFuelBay(g, w, h) {
+  const L = fuelLayout(w, h);
+  const pools = Math.round(g.size / 3000);
+  for (let k = 0; k < pools; k++) g.placeBlob(Math.random() * w, Math.random() * h, 28 + Math.random() * 45, 4); // dense engine-oil spills
+  for (const is of L.islands) for (let k = 0; k < 16; k++) g.placeBlob(is.x + (Math.random() * 1.8 - 0.4) * is.w, is.y + Math.random() * is.h, 6 + Math.random() * 10, 4);
+  const skids = Math.max(4, Math.round(g.size / 5500));
+  for (let k = 0; k < skids; k++) { // baked-on tire rubber
+    let x = Math.random() * w, y = Math.random() * h, ang = Math.random() * Math.PI * 2;
+    const curve = (Math.random() - 0.5) * 0.05;
+    for (let s = 0; s < 80; s++) { g.placeBlob(x, y, 7, 5); x += Math.cos(ang) * 5; y += Math.sin(ang) * 5; ang += curve; }
+  }
+}
+
+// ---------- Contract 4, Stage 1: Travertine pool deck ----------
+function poolLayout(w, h) {
+  return cached('pool' + w + 'x' + h, () => {
+    const t = Math.max(14, Math.min(w, h) * 0.035);
+    const px1 = w * 0.2, py1 = h * 0.22, px2 = w * 0.8, py2 = h * 0.62;
+    const loungers = [];
+    for (let i = 0; i < 3; i++) { loungers.push([w * (0.1 + i * 0.27), h * 0.07, w * 0.12, h * 0.08]); loungers.push([w * (0.1 + i * 0.27), h * 0.77, w * 0.12, h * 0.08]); }
+    return { t, px1, py1, px2, py2, loungers, ladder: [px2 - w * 0.012, py1 + (py2 - py1) * 0.3, t * 1.4, h * 0.05] };
+  });
+}
+
+function poolClassify(px, py, w, h) {
+  const L = poolLayout(w, h);
+  if (inBox(px, py, ...L.ladder)) return MATERIALS.TRIM;
+  if (inBox(px, py, L.px1, L.py1, L.px2 - L.px1, L.py2 - L.py1)) return MATERIALS.AIR;   // pool water holds no grime
+  if (inBox(px, py, L.px1 - L.t, L.py1 - L.t, L.px2 - L.px1 + 2 * L.t, L.py2 - L.py1 + 2 * L.t)) return MATERIALS.TILE;
+  for (const l of L.loungers) if (inBox(px, py, ...l)) return MATERIALS.TRIM;
+  return MATERIALS.TRAVERTINE;
+}
+
+function drawPoolDeckClean(c, w, h) {
+  const L = poolLayout(w, h);
+  c.save();
+  c.fillStyle = '#e9dcc3'; c.fillRect(0, 0, w, h);
+  for (let i = 0; i < 6000; i++) { c.fillStyle = i % 2 ? 'rgba(255,255,255,0.22)' : 'rgba(146,120,84,0.16)'; c.fillRect(Math.random() * w, Math.random() * h, 3, 2); }
+  c.strokeStyle = 'rgba(146,120,84,0.55)'; c.lineWidth = 3;
+  const tile = Math.max(60, w / 12);
+  for (let x = 0; x < w; x += tile) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, h); c.stroke(); }
+  for (let y = 0; y < h; y += tile * 0.66) { c.beginPath(); c.moveTo(0, y); c.lineTo(w, y); c.stroke(); }
+  // glazed tile coping
+  c.fillStyle = '#2dd4bf'; c.fillRect(L.px1 - L.t, L.py1 - L.t, L.px2 - L.px1 + 2 * L.t, L.py2 - L.py1 + 2 * L.t);
+  c.strokeStyle = '#0f766e'; c.lineWidth = 2;
+  for (let x = L.px1 - L.t; x < L.px2 + L.t; x += L.t / 2) { c.beginPath(); c.moveTo(x, L.py1 - L.t); c.lineTo(x, L.py1); c.moveTo(x, L.py2); c.lineTo(x, L.py2 + L.t); c.stroke(); }
+  for (let y = L.py1 - L.t; y < L.py2 + L.t; y += L.t / 2) { c.beginPath(); c.moveTo(L.px1 - L.t, y); c.lineTo(L.px1, y); c.moveTo(L.px2, y); c.lineTo(L.px2 + L.t, y); c.stroke(); }
+  const water = c.createLinearGradient(0, L.py1, 0, L.py2);
+  water.addColorStop(0, '#38bdf8'); water.addColorStop(1, '#0369a1');
+  c.fillStyle = water; c.fillRect(L.px1, L.py1, L.px2 - L.px1, L.py2 - L.py1);
+  c.strokeStyle = 'rgba(255,255,255,0.22)'; c.lineWidth = 2;
+  for (let k = 0; k < 14; k++) { const y = L.py1 + (k + 1) * (L.py2 - L.py1) / 15; c.beginPath(); for (let x = L.px1; x <= L.px2; x += 16) c.lineTo(x, y + Math.sin(x * 0.05 + k) * 4); c.stroke(); }
+  for (const [x, y, ww, hh] of L.loungers) {
+    c.fillStyle = '#f8fafc'; c.fillRect(x, y, ww, hh);
+    c.fillStyle = '#2563eb'; c.fillRect(x + ww * 0.05, y + hh * 0.12, ww * 0.7, hh * 0.76);
+    c.fillStyle = '#93c5fd'; c.fillRect(x + ww * 0.78, y + hh * 0.12, ww * 0.17, hh * 0.76);
+  }
+  const [lx, ly, lw, lh] = L.ladder;
+  c.strokeStyle = '#e2e8f0'; c.lineWidth = 5; c.beginPath(); c.moveTo(lx, ly); c.lineTo(lx + lw * 0.5, ly + lh); c.moveTo(lx + lw, ly); c.lineTo(lx + lw * 0.5, ly + lh); c.stroke();
+  c.restore();
+}
+
+function setupPoolDeck(g, w, h) {
+  const L = poolLayout(w, h);
+  for (let y = 0; y < g.gh; y++) {
+    for (let x = 0; x < g.gw; x++) {
+      const i = y * g.gw + x, m = g.material[i];
+      if (m === AIR_ID) continue;
+      const px = x * GRID_SCALE + 2, py = y * GRID_SCALE + 2;
+      const d = Math.hypot(Math.max(L.px1 - px, 0, px - L.px2), Math.max(L.py1 - py, 0, py - L.py2));
+      let p = 0;
+      if (m === MATERIALS.TILE.id) p = 0.85;                                           // green slime on the tile edge
+      else if (d < L.t * 3.5) p = 0.35 * (1 - (d - L.t) / (L.t * 2.5));               // creeping onto the deck
+      if (p > 0 && vnoise(x, y, 6, 11) > 1 - p) g.setKind(i, 7);
+    }
+  }
+  // sun-baked calcium scale crusting the splash zone around the pool
+  const scale = Math.round(g.size / 900);
+  for (let k = 0; k < scale; k++) {
+    const x = L.px1 - 5 * L.t + Math.random() * (L.px2 - L.px1 + 10 * L.t), y = L.py1 - 5 * L.t + Math.random() * (L.py2 - L.py1 + 10 * L.t);
+    if (inBox(x, y, L.px1, L.py1, L.px2 - L.px1, L.py2 - L.py1)) continue;
+    g.placeBlob(x, y, 14 + Math.random() * 32, 8);
+  }
+  for (const l of L.loungers) for (let k = 0; k < 3; k++) g.placeBlob(l[0] + Math.random() * l[2], l[1] + Math.random() * l[3], 14 + Math.random() * 14, 6); // sunscreen residue
+}
+
+// ---------- Contract 4, Stage 2: Storm-weathered courtyard & graffiti mural ----------
+function courtLayout(w, h) {
+  return cached('court' + w + 'x' + h, () => {
+    const roofY = h * 0.1, groundY = h * 0.88, seamX = w * 0.46, ww = Math.max(40, w * 0.1);
+    return {
+      roofY, groundY, seamX,
+      wins: [{ cx: w * 0.2, y: h * 0.14, w: ww, h: h * 0.17 }, { cx: w * 0.72, y: h * 0.14, w: ww, h: h * 0.17 }],
+      pipe: [seamX - w * 0.006, roofY, w * 0.012, groundY - roofY],
+      mural: [w * 0.1, h * 0.36, w * 0.8, h * 0.42]
+    };
+  });
+}
+function inArch(px, py, a) {
+  const x0 = a.cx - a.w / 2;
+  if (px < x0 || px > x0 + a.w) return false;
+  const r = a.w / 2, cy = a.y + r;
+  return py >= cy ? py <= a.y + a.h : Math.hypot(px - a.cx, py - cy) < r;
+}
+function courtClassify(px, py, w, h) {
+  const L = courtLayout(w, h);
+  if (py < L.roofY) return MATERIALS.AIR;
+  if (py > L.groundY) return MATERIALS.STONE;
+  for (const a of L.wins) if (inArch(px, py, a)) return MATERIALS.GLASS;
+  if (inBox(px, py, ...L.pipe)) return MATERIALS.TRIM;
+  return px > L.seamX ? MATERIALS.STUCCO : MATERIALS.STONE;
+}
+
+function drawCourtyardClean(c, w, h) {
+  const L = courtLayout(w, h);
+  c.save();
+  const sky = c.createLinearGradient(0, 0, 0, L.roofY);
+  sky.addColorStop(0, '#1e293b'); sky.addColorStop(1, '#475569');
+  c.fillStyle = sky; c.fillRect(0, 0, w, L.roofY + 4);
+  c.fillStyle = 'rgba(148,163,184,0.35)';
+  for (let k = 0; k < 7; k++) { c.beginPath(); c.ellipse(w * (k / 6), L.roofY * 0.5, w * 0.12, L.roofY * 0.3, 0, 0, Math.PI * 2); c.fill(); }
+  // brick (left) and stucco (right)
+  c.fillStyle = '#9a3412'; c.fillRect(0, L.roofY, L.seamX, L.groundY - L.roofY);
+  const bw = 54, bh = 24;
+  for (let y = Math.floor(L.roofY); y < L.groundY; y += bh) {
+    const off = (Math.floor(y / bh) % 2) * (bw / 2);
+    for (let x = -bw; x < L.seamX; x += bw) {
+      c.fillStyle = ((x + y) % 3 === 0) ? '#7c2d12' : '#b45309';
+      c.fillRect(Math.max(0, x + off + 2), y + 2, Math.min(bw - 4, L.seamX - (x + off + 2)), bh - 4);
+    }
+  }
+  c.fillStyle = '#d6c7a8'; c.fillRect(L.seamX, L.roofY, w - L.seamX, L.groundY - L.roofY);
+  for (let i = 0; i < 5000; i++) { c.fillStyle = i % 2 ? 'rgba(255,255,255,0.2)' : 'rgba(120,98,64,0.18)'; c.fillRect(L.seamX + Math.random() * (w - L.seamX), L.roofY + Math.random() * (L.groundY - L.roofY), 3, 3); }
+  c.fillStyle = '#334155'; c.fillRect(0, L.roofY - 8, w, 14);
+  // arched windows
+  for (const a of L.wins) {
+    const r = a.w / 2;
+    c.fillStyle = '#f8fafc'; c.beginPath(); c.arc(a.cx, a.y + r, r + 7, Math.PI, 0); c.lineTo(a.cx + r + 7, a.y + a.h + 7); c.lineTo(a.cx - r - 7, a.y + a.h + 7); c.closePath(); c.fill();
+    const g = c.createLinearGradient(a.cx - r, a.y, a.cx + r, a.y + a.h);
+    g.addColorStop(0, '#7dd3fc'); g.addColorStop(1, '#0369a1');
+    c.fillStyle = g; c.beginPath(); c.arc(a.cx, a.y + r, r, Math.PI, 0); c.lineTo(a.cx + r, a.y + a.h); c.lineTo(a.cx - r, a.y + a.h); c.closePath(); c.fill();
+  }
+  c.fillStyle = '#64748b'; c.fillRect(...L.pipe);
+  // wet cobbles
+  c.fillStyle = '#475569'; c.fillRect(0, L.groundY, w, h - L.groundY);
+  c.strokeStyle = '#334155'; c.lineWidth = 3;
+  for (let y = L.groundY; y < h; y += 26) for (let x = ((y / 26) % 2) * 20; x < w; x += 40) c.strokeRect(x, y, 40, 26);
+  c.restore();
+}
+
+function setupCourtyard(g, w, h) {
+  const L = courtLayout(w, h);
+  const [mx, my, mw, mh] = L.mural;
+  for (let y = 0; y < g.gh; y++) {
+    for (let x = 0; x < g.gw; x++) {
+      const px = x * GRID_SCALE + 2, py = y * GRID_SCALE + 2;
+      if (!inBox(px, py, mx, my, mw, mh)) continue;
+      const nx = (px - mx) / mw * 2 - 1, ny = (py - my) / mh * 2 - 1;
+      if (nx * nx * 0.9 + ny * ny * 1.2 > 1.05) continue;                        // soft-edged mural
+      const cover = vnoise(x, y, 9, 21) * 0.65 + vnoise(x, y, 3, 22) * 0.35;
+      if (cover > 0.48) g.setKind(y * g.gw + x, 2, Math.floor(vnoise(x, y, 16, 23) * 6) % 6); // thick layered spray paint
+    }
+  }
+  const moss = Math.round(g.size / 1800);
+  for (let k = 0; k < moss; k++) { // moss at the base of the wall and under the windows
+    if (Math.random() < 0.65) g.placeBlob(Math.random() * w, h * (0.66 + Math.random() * 0.22), 16 + Math.random() * 28, 3);
+    else { const a = L.wins[Math.random() < 0.5 ? 0 : 1]; g.placeBlob(a.cx + (Math.random() - 0.5) * w * 0.14, a.y + a.h + h * (0.01 + Math.random() * 0.05), 14 + Math.random() * 22, 3); }
+  }
+}
+
 // ================= GAMEPLAY LOGIC =================
 let hintTimer = null;
+function placeHint() {
+  const el = document.getElementById('hint');
+  el.style.top = window.innerWidth <= 900 ? (document.getElementById('hud-top').getBoundingClientRect().bottom + 8) + 'px' : '';
+}
 function showHint(html, ms = 7000) {
   const el = document.getElementById('hint');
   el.innerHTML = html;
+  placeHint();
   el.classList.add('show');
   clearTimeout(hintTimer);
   hintTimer = setTimeout(() => el.classList.remove('show'), ms);
@@ -1751,7 +2439,14 @@ function loadStage(projectIdx, stageIdx, announce = true) {
   damageCanvas.height = canvas.height;
 
   stage.drawClean(cleanCtx, canvas.width, canvas.height);
-  fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'), cleanCtx, stage.skyFrac || 0);
+  fluidGrid = new FluidGrimeGrid(canvas.width, canvas.height, stage.dirtType.startsWith('facade'), cleanCtx, stage.skyFrac || 0, stage);
+  if (stage.setup) stage.setup(fluidGrid, canvas.width, canvas.height);
+  fluidGrid.recomputeInitial();
+
+  // Some contracts force the weather (and lock the manual toggle)
+  state.weatherLocked = stage.forceWeather !== undefined;
+  if (state.weatherLocked) setWeather(stage.forceWeather);
+  document.getElementById('weather-btn').textContent = state.weatherLocked ? '🔒 Weather locked' : '🌦 Next Weather (W)';
 
   updateHUD();
 
@@ -1773,13 +2468,14 @@ function setWeather(idx) {
 }
 
 function nextWeather() {
+  if (state.weatherLocked) { showToast('🔒 The weather is locked on this contract'); return; }
   setWeather(state.weatherIdx + 1);
 }
 
 let weatherHudTimer = 0;
 function updateWeather(dt) {
   state.weatherTimer += dt;
-  if (state.weatherTimer > 45) nextWeather(); // auto-cycle every 45 seconds
+  if (!state.weatherLocked && state.weatherTimer > 45) nextWeather(); // auto-cycle every 45 seconds
 
   // Ease current conditions toward the target state (~2.5s time constant)
   const tgt = WEATHER_STATES[state.weatherIdx], cur = state.currentWeather;
@@ -1794,6 +2490,7 @@ function updateWeather(dt) {
     document.getElementById('wh-rain').textContent = (cur.rainRate * 3.5).toFixed(1) + ' in/hr';
     document.getElementById('wh-temp').textContent = `${Math.round(cur.temp)}°C`;
     document.getElementById('wh-particles').textContent = state.particles.length;
+    sound.setWeather(cur.rainRate, cur.windX); // rain / wind drive the ambience
   }
 }
 
@@ -1974,7 +2671,7 @@ function updateHUD() {
   const proj = PROJECTS[state.projectIdx];
   const stage = proj.stages[state.stageIdx];
   document.getElementById('ui-job-name').textContent = proj.name;
-  document.getElementById('ui-stage-badge').textContent = `${stage.name} (${state.stageIdx + 1}/${proj.stages.length})`;
+  document.getElementById('ui-stage-badge').textContent = `${state.stageIdx + 1}/${proj.stages.length} · ${stage.name.replace(/^Stage \d+:\s*/, '')}`;
   document.getElementById('ui-cash').textContent = `$${state.cash}`;
   updateRepairHUD();
   updateTimerHUD();
@@ -2012,6 +2709,7 @@ function updateRepairHUD() {
   const r = state.stats.repairPenalty;
   el.style.display = r > 0 ? 'block' : 'none';
   el.textContent = `🔧 −$${r}`;
+  placeHint();
 }
 
 function onSurfaceDamage(chips, nozzle) {
@@ -2068,7 +2766,7 @@ function renderJobsModal() {
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div class="card-info">
           <h3>${p.name}</h3>
-          <p>Client: ${p.client} • Total Contract Value: <strong style="color:#34d399">$${p.totalReward}</strong></p>
+          <p>Client: ${p.client} • Difficulty: <strong style="color:#fbbf24">${p.difficulty || 'Standard'}</strong> • Total Contract Value: <strong style="color:#34d399">$${p.totalReward}</strong></p>
         </div>
         <button class="primary" onclick="startProjectStage(${pIdx}, 0)">Start Contract</button>
       </div>
@@ -2132,6 +2830,7 @@ function resize() {
   }
 }
 window.addEventListener('resize', resize);
+window.addEventListener('resize', () => placeHint());
 
 canvas.addEventListener('pointermove', e => {
   state.mouse.x = e.clientX;
@@ -2297,6 +2996,7 @@ function loop(now) {
 // Init
 resize();
 buildNozzleDock();
+updateAudioButtons();
 
 // Unlock Web Audio on the very first tap / click / key, then stop listening once it is running
 const UNLOCK_EVENTS = ['pointerdown', 'touchend', 'keydown', 'click'];
