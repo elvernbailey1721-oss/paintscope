@@ -313,6 +313,16 @@
   #toast.warn { background: #7f1d1d; border-color: #f87171; color: #fee2e2; box-shadow: 0 10px 30px rgba(127, 29, 29, 0.6); }
   .nozzle-warn { color: #f87171; }
 
+  /* Contract completion */
+  .confetti { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+  .confetti i { position: absolute; top: -20px; width: 9px; height: 14px; opacity: 0.9; animation: confettiFall linear forwards; }
+  @keyframes confettiFall { to { transform: translateY(110vh) rotate(720deg); } }
+  .grade { font-size: 84px; font-weight: 900; line-height: 1; margin: 4px 0 6px; color: #fbbf24; text-shadow: 0 0 28px rgba(251, 191, 36, 0.55); }
+  .grade.g-S { color: #f0abfc; text-shadow: 0 0 30px rgba(240, 171, 252, 0.65); }
+  .grade.g-B { color: #38bdf8; text-shadow: 0 0 24px rgba(56, 189, 248, 0.5); }
+  .grade.g-C { color: #94a3b8; text-shadow: none; }
+  .ct-quote { color: #94a3b8; font-style: italic; font-size: 13px; margin: 0 8px 14px; }
+
   /* Stage results */
   .stars { font-size: 44px; letter-spacing: 8px; margin: 4px 0 18px; }
   .star { display: inline-block; color: #334155; transform: scale(0.4); opacity: 0; animation: starIn 0.45s forwards; }
@@ -441,6 +451,23 @@
   </div>
 </div>
 
+<!-- Contract Completion Modal -->
+<div class="modal-backdrop" id="contract-modal">
+  <div class="confetti" id="confetti"></div>
+  <div class="modal" style="max-width:560px;text-align:center;position:relative;">
+    <h2 id="ct-title">🏆 Contract Complete</h2>
+    <p class="sub" id="ct-sub" style="margin-bottom:10px;"></p>
+    <div class="grade" id="ct-grade">A</div>
+    <div class="ct-quote" id="ct-quote"></div>
+    <div id="ct-rows" class="res-rows"></div>
+    <div class="res-total"><span>Contract earnings</span><strong id="ct-total">$0</strong></div>
+    <div class="modal-footer" style="justify-content:center;margin-top:22px;">
+      <button onclick="contractToList()">📋 Contracts</button>
+      <button class="primary" id="ct-next" onclick="contractNext()">Next Contract ▶</button>
+    </div>
+  </div>
+</div>
+
 <!-- Project Board Modal -->
 <div class="modal-backdrop" id="jobs-modal">
   <div class="modal">
@@ -514,7 +541,14 @@ class SoundEngine {
     this.gainNode.gain.value = 0;
 
     noise.connect(this.filterNode);
-    this.filterNode.connect(this.gainNode);
+    // Surface-reactive resonance sits between the nozzle filter and the output
+    this.resFilter = this.ctx.createBiquadFilter();
+    this.resFilter.type = 'peaking';
+    this.resFilter.frequency.value = 200;
+    this.resFilter.Q.value = 1;
+    this.resFilter.gain.value = 0;
+    this.filterNode.connect(this.resFilter);
+    this.resFilter.connect(this.gainNode);
     this.gainNode.connect(this.ctx.destination);
     noise.start();
     this.initBuses();
@@ -718,16 +752,29 @@ class SoundEngine {
     if (this.ctx.state === 'suspended') this.ctx.resume();
     const now = this.ctx.currentTime;
     if (active && !this.isSpraying) {
-      this.gainNode.gain.setTargetAtTime(0.24, now, 0.03);
+      this.gainNode.gain.setTargetAtTime(0.24 * (this.surfGm || 1), now, 0.03);
       this.isSpraying = true;
     } else if (!active && this.isSpraying) {
       this.gainNode.gain.setTargetAtTime(0, now, 0.04);
       this.isSpraying = false;
     }
     if (active && nozzle) {
-      this.filterNode.frequency.setTargetAtTime(nozzle.freq, now, 0.05);
+      this.baseFreq = nozzle.freq; this.baseQ = nozzle.q;
+      this.filterNode.frequency.setTargetAtTime(nozzle.freq * (this.surfFm || 1), now, 0.05);
       this.filterNode.Q.setTargetAtTime(nozzle.q, now, 0.05);
     }
+  }
+  // Retune the live spray to the surface under the cursor (called every spraying frame)
+  setSurface(matId, clean, foamy) {
+    if (!this.ctx || !this.resFilter || !this.isSpraying || !this.enabled) return;
+    const s = SURFACE_SOUND[matId] || SURFACE_SOUND[0], now = this.ctx.currentTime;
+    this.surfFm = s.fm * (clean ? 1.12 : 1) * (foamy ? 0.85 : 1);   // clean surface = hissier, foam = softer
+    this.surfGm = s.gm * (clean ? 0.9 : 1) * (foamy ? 0.7 : 1);
+    this.filterNode.frequency.setTargetAtTime((this.baseFreq || 1200) * this.surfFm, now, 0.04);
+    this.resFilter.frequency.setTargetAtTime(s.f, now, 0.04);
+    this.resFilter.Q.setTargetAtTime(s.q, now, 0.04);
+    this.resFilter.gain.setTargetAtTime(s.g, now, 0.04);
+    this.gainNode.gain.setTargetAtTime(0.24 * this.surfGm, now, 0.05);
   }
   playTruckHorn() {
     if (!this.enabled) return;
@@ -745,6 +792,22 @@ class SoundEngine {
       gain.connect(this.ctx.destination);
       osc.start(now);
       osc.stop(now + 0.36);
+    });
+  }
+  playFanfare() {
+    if (!this.enabled) return;
+    if (!this.ctx) this.init();
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const c = this.ctx, now = c.currentTime;
+    [[523.25, 0], [659.25, 0.11], [783.99, 0.22], [1046.5, 0.33], [1318.5, 0.5], [1567.98, 0.62]].forEach(([f, d], i) => {
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = i < 4 ? 'triangle' : 'sine';
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, now + d);
+      g.gain.linearRampToValueAtTime(0.13, now + d + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, now + d + 0.9);
+      o.connect(g); g.connect(c.destination);
+      o.start(now + d); o.stop(now + d + 0.95);
     });
   }
   playDamage() {
@@ -804,7 +867,9 @@ function saveGame(over = {}) {
       stageIdx: over.stageIdx ?? state.stageIdx,
       upgrades: UPGRADES.map(u => u.level),
       completed: PROJECTS.map(p => p.stages.map(st => !!st.completed)),
-      stars: PROJECTS.map(p => p.stages.map(st => st.stars || 0))
+      stars: PROJECTS.map(p => p.stages.map(st => st.stars || 0)),
+      bonus: PROJECTS.map(p => !!p.bonusPaid),
+      last: PROJECTS.map(p => p.stages.map(st => st.last || null))
     }));
   } catch (e) { /* storage unavailable */ }
 }
@@ -841,6 +906,8 @@ function applySave(d) {
   state.stageIdx = PROJECTS[state.projectIdx].stages[d.stageIdx] ? d.stageIdx : 0;
   (d.upgrades || []).forEach((lv, i) => { if (UPGRADES[i]) UPGRADES[i].level = Math.max(1, Math.min(UPGRADES[i].max, lv | 0)); });
   (d.completed || []).forEach((row, pi) => (row || []).forEach((c, si) => { if (PROJECTS[pi] && PROJECTS[pi].stages[si]) PROJECTS[pi].stages[si].completed = !!c; }));
+  (d.bonus || []).forEach((b, pi) => { if (PROJECTS[pi]) PROJECTS[pi].bonusPaid = !!b; });
+  (d.last || []).forEach((row, pi) => (row || []).forEach((l, si) => { if (l && PROJECTS[pi] && PROJECTS[pi].stages[si]) PROJECTS[pi].stages[si].last = l; }));
   (d.stars || []).forEach((row, pi) => (row || []).forEach((n, si) => { if (PROJECTS[pi] && PROJECTS[pi].stages[si]) PROJECTS[pi].stages[si].stars = Math.max(0, Math.min(3, n | 0)); }));
 }
 
@@ -1074,6 +1141,8 @@ let state = {
   rain: [],
   stageTime: 0,
   weatherLocked: false,
+  shake: 0,
+  contractIdx: 0,
   stats: { etchedCells: 0, incidents: 0, repairPenalty: 0, lastIncident: -99 },
   pendingResults: null
 };
@@ -1116,6 +1185,21 @@ const MATERIAL_LIST = [MATERIALS.STONE, MATERIALS.GLASS, MATERIALS.TRIM, MATERIA
 const AIR_ID = MATERIALS.AIR.id;
 const FRAGILE = [0, 0.45, 0.55, 0, 0.8, 0, 0, 0];   // chip threshold by material id (0 = cannot be damaged); paint only scuffs under the 0deg jet
 const MATERIAL_CUT = [1.0, 0.75, 0.85, 1.0, 0.9, 0.85, 1.05, 1.0]; // grime cutting-threshold multiplier by material id
+
+// Respect the OS "reduce motion" setting for screen shake
+const REDUCED_MOTION = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+// How the spray sounds on each surface: a resonant peak (f, q, gain dB), a pitch multiplier and a level multiplier
+const SURFACE_SOUND = [
+  { f: 180,  q: 0.9, g: 3, fm: 1.0,  gm: 1.0  },   // 0 stone / brick / concrete: dull and gritty (baseline)
+  { f: 3400, q: 5,   g: 9, fm: 1.25, gm: 0.9  },   // 1 glass: bright ringing
+  { f: 1900, q: 6,   g: 8, fm: 1.1,  gm: 0.95 },   // 2 metal / trim: metallic ring
+  { f: 600,  q: 1,   g: 2, fm: 0.7,  gm: 0.45 },   // 3 open air / water: soft and muted
+  { f: 1300, q: 3,   g: 5, fm: 1.1,  gm: 0.95 },   // 4 painted aluminium
+  { f: 2600, q: 4,   g: 6, fm: 1.15, gm: 0.95 },   // 5 glazed tile
+  { f: 220,  q: 0.9, g: 3, fm: 1.0,  gm: 1.0  },   // 6 travertine
+  { f: 260,  q: 0.9, g: 3, fm: 1.0,  gm: 1.0  }    // 7 stucco
+];
 
 // Stubborn grime kinds (stored per cell in grid.stubborn): extra cutting threshold, hardness floor, look
 // 1 gum/tar  2 graffiti  3 moss  4 engine oil  5 tire rubber  6 sunscreen  7 pool algae  8 calcium scale
@@ -1224,6 +1308,14 @@ class FluidGrimeGrid {
 
     this.initialGrime = 0;
     for (let i = 0; i < this.size; i++) this.initialGrime += this.grime[i];
+  }
+
+  // What is under the cursor? (drives the spray sound)
+  surfaceAt(x, y) {
+    const gx = Math.max(0, Math.min(this.gw - 1, Math.floor(x / GRID_SCALE)));
+    const gy = Math.max(0, Math.min(this.gh - 1, Math.floor(y / GRID_SCALE)));
+    const i = gy * this.gw + gx;
+    return { mat: this.material[i], clean: this.grime[i] < 0.05, foamy: this.foam[i] > 0.4 };
   }
 
   recomputeInitial() {
@@ -1367,6 +1459,7 @@ class FluidGrimeGrid {
     const endY = Math.min(this.gh - 1, Math.floor((screenY + effectiveRadius) / GRID_SCALE));
 
     let chips = 0; // newly chipped delicate cells this call
+    this.splat = { n: 0, r: 0, g: 0, b: 0 }; // dirt stripped this call, colour-weighted, for splatter particles
 
     for (let gy = startY; gy <= endY; gy++) {
       for (let gx = startX; gx <= endX; gx++) {
@@ -1408,6 +1501,11 @@ class FluidGrimeGrid {
             if (effectivePSI > threshold) {
               const removeAmount = (effectivePSI - threshold) * falloff * 0.5 * rate;
               const detached = Math.min(this.grime[i], removeAmount);
+              if (detached > 0.002) {
+                const kd = this.stubborn[i];
+                const col = kd ? (kd === 2 ? GRAFFITI_PAL[this.tint[i] % GRAFFITI_PAL.length] : KIND_RGB[kd]) : [92, 70, 46];
+                this.splat.n += detached; this.splat.r += col[0] * detached; this.splat.g += col[1] * detached; this.splat.b += col[2] * detached;
+              }
               this.grime[i] -= detached;
               if (this.grime[i] < 0.05) this.cooldown[i] = CLEAN_GRACE;
               this.sediment[i] += detached * (this.stubborn[i] ? 0.3 : 0.9); // dissolved oil / paint doesn't redeposit as mud
@@ -2526,23 +2624,54 @@ function drawWeatherOverlay(dt) {
   ctx.restore();
 }
 
+function addShake(mag) {
+  if (REDUCED_MOTION) return;
+  state.shake = Math.min(12, state.shake + mag);
+}
+
+function pushParticle(p) {
+  if (state.particles.length < 600) state.particles.push(p);
+}
+
 function spawnSprayParticles(x, y, nozzle) {
   const lanceBonus = 1 + (UPGRADES[1].level - 1) * 0.20;
   const radius = nozzle.radius * lanceBonus;
+  const wind = state.currentWeather.windX * 10;
 
-  for (let i = 0; i < 8; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const dist = Math.random() * radius * 0.9;
-    state.particles.push({
-      x: x + Math.cos(angle) * dist,
-      y: y + Math.sin(angle) * dist,
-      vx: (Math.random() - 0.5) * 6 + state.currentWeather.windX * 10,
-      vy: (Math.random() - 0.5) * 6 - 2.5,
-      life: 1,
-      maxLife: 1,
-      color: nozzle.isSoap ? '#e0f2fe' : '#bae6fd',
-      size: nozzle.isSoap ? 5 : 3
-    });
+  if (nozzle.isSoap) {
+    for (let i = 0; i < 5; i++) { // foam bubbles drift and float
+      const a = Math.random() * Math.PI * 2, d = Math.random() * radius * 0.9;
+      pushParticle({ x: x + Math.cos(a) * d, y: y + Math.sin(a) * d, vx: (Math.random() - 0.5) * 1.6 + wind * 0.2, vy: -0.4 - Math.random() * 0.8,
+        life: 1, g: -0.01, decay: 0.9, color: 'rgba(240,249,255,0.75)', size: 3 + Math.random() * 5 });
+    }
+  } else {
+    for (let i = 0; i < 6; i++) {
+      const a = Math.random() * Math.PI * 2, d = Math.random() * radius * 0.9;
+      pushParticle({ x: x + Math.cos(a) * d, y: y + Math.sin(a) * d, vx: (Math.random() - 0.5) * 6 + wind, vy: (Math.random() - 0.5) * 6 - 2.5,
+        life: 1, color: '#bae6fd', size: 2 + Math.random() * 1.5 });
+    }
+  }
+
+  // Micro-splatter: flecks of whatever is being stripped (soot, oil, moss, graffiti paint...) fly off the surface
+  const sp = fluidGrid && fluidGrid.splat;
+  if (sp && sp.n > 0.03) {
+    const col = `rgb(${Math.round(sp.r / sp.n)},${Math.round(sp.g / sp.n)},${Math.round(sp.b / sp.n)})`;
+    const count = Math.min(16, Math.ceil(sp.n * 4));
+    const power = 2.5 + (nozzle.impact || 0) * 4;
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2, spd = power * (0.4 + Math.random());
+      pushParticle({ x: x + Math.cos(a) * radius * 0.4, y: y + Math.sin(a) * radius * 0.4, vx: Math.cos(a) * spd + wind * 0.3, vy: Math.sin(a) * spd - 1.5,
+        life: 1, g: 0.32, decay: 1.7 + Math.random() * 0.8, color: col, size: 1 + Math.random() * 2.2 });
+    }
+  }
+}
+
+// Glass / trim chipping: bright shards
+function spawnShards(x, y, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, spd = 3 + Math.random() * 6;
+    pushParticle({ x, y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 2, life: 1, g: 0.35, decay: 2.2,
+      color: Math.random() < 0.6 ? '#f8fafc' : '#bae6fd', size: 1.2 + Math.random() * 1.8 });
   }
 }
 
@@ -2594,6 +2723,8 @@ function completeCurrentStage() {
 
   stage.completed = true;
   stage.stars = Math.max(stage.stars || 0, r.stars);
+  stage.last = { total: r.total, time: Math.round(r.time), incidents: r.incidents, repairs: r.repairs, stars: r.stars };
+  addShake(5);
   state.cash += r.total;
   sound.playChime();
 
@@ -2628,6 +2759,10 @@ function showResults(r, stage, proj) {
   openModal('results-modal');
 }
 
+function contractDone(proj) {
+  return proj.stages.every(st => st.completed);
+}
+
 function resultsNext() {
   const r = state.pendingResults;
   if (!r) { closeModals(); return; }
@@ -2636,6 +2771,8 @@ function resultsNext() {
   if (r.hasNext) {
     loadStage(state.projectIdx, state.stageIdx + 1);
     saveGame();
+  } else if (contractDone(PROJECTS[state.projectIdx])) {
+    showContractComplete(PROJECTS[state.projectIdx]);
   } else {
     openModal('jobs-modal');
   }
@@ -2646,7 +2783,75 @@ function resultsContracts() {
   state.pendingResults = null;
   closeModals();
   if (r && r.hasNext) { loadStage(state.projectIdx, state.stageIdx + 1); saveGame(); }
+  else if (r && !r.hasNext && contractDone(PROJECTS[state.projectIdx])) { showContractComplete(PROJECTS[state.projectIdx]); return; }
   openModal('jobs-modal');
+}
+
+const CONTRACT_QUOTES = {
+  S: '"Spotless. Not a scratch anywhere. We will be recommending you to every client we know."',
+  A: '"Excellent work, barely a mark on it. You have the contract for next season."',
+  B: '"Solid job overall. A few scuffs, but the site looks great. Thank you."',
+  C: '"It is clean... mostly. Mind the glass and the clock next time."'
+};
+
+function showContractComplete(proj) {
+  state.contractIdx = PROJECTS.indexOf(proj);
+  const n = proj.stages.length;
+  let earned = 0, time = 0, incidents = 0, repairs = 0, starsGot = 0;
+  const rows = proj.stages.map(st => {
+    const l = st.last || { total: 0, time: 0, incidents: 0, repairs: 0 };
+    earned += l.total; time += l.time; incidents += l.incidents; repairs += l.repairs; starsGot += st.stars || 0;
+    return `<div class="res-row"><span>${st.name.replace(/^Stage \d+:\s*/, '')}<small>${fmtTime(l.time)}</small></span><span>${starText(st.stars || 0)} &nbsp; $${l.total}</span></div>`;
+  });
+  const ratio = starsGot / (3 * n);
+  const grade = ratio >= 1 ? 'S' : ratio >= 0.84 ? 'A' : ratio >= 0.67 ? 'B' : 'C';
+
+  // One-time completion bonus (and a perfect-contract bonus for straight 3-star work)
+  let bonusRows = '', bonus = 0;
+  if (!proj.bonusPaid) {
+    const base = Math.round(proj.totalReward * 0.10);
+    const perfect = starsGot === 3 * n ? Math.round(proj.totalReward * 0.20) : 0;
+    bonus = base + perfect;
+    proj.bonusPaid = true;
+    state.cash += bonus;
+    bonusRows += `<div class="res-row"><span>Contract completion bonus<small>10% of contract value</small></span><span class="pos">+$${base}</span></div>`;
+    if (perfect) bonusRows += `<div class="res-row"><span>Perfect contract bonus<small>every stage 3★</small></span><span class="pos">+$${perfect}</span></div>`;
+  } else {
+    bonusRows += `<div class="res-row"><span>Completion bonus<small>already collected</small></span><span>$0</span></div>`;
+  }
+  rows.push(`<div class="res-row"><span>Total time · damage incidents</span><span>${fmtTime(time)} · ${incidents}${repairs ? ` <span class="neg">(−$${repairs})</span>` : ''}</span></div>`);
+
+  document.getElementById('ct-sub').textContent = `${proj.name} — ${proj.client} · ${proj.difficulty || 'Standard'}`;
+  const gEl = document.getElementById('ct-grade');
+  gEl.textContent = grade;
+  gEl.className = `grade g-${grade}`;
+  document.getElementById('ct-quote').textContent = CONTRACT_QUOTES[grade];
+  document.getElementById('ct-rows').innerHTML = rows.join('') + bonusRows;
+  document.getElementById('ct-total').textContent = `$${earned + bonus}`;
+  const hasNextContract = state.contractIdx + 1 < PROJECTS.length;
+  document.getElementById('ct-next').style.display = hasNextContract ? '' : 'none';
+
+  const cf = document.getElementById('confetti');
+  const colors = ['#f87171', '#fbbf24', '#34d399', '#38bdf8', '#e879f9', '#fb923c'];
+  cf.innerHTML = Array.from({ length: 46 }, () =>
+    `<i style="left:${Math.random() * 100}%;background:${colors[Math.floor(Math.random() * colors.length)]};animation-duration:${2.4 + Math.random() * 2.4}s;animation-delay:${Math.random() * 1.2}s"></i>`).join('');
+
+  sound.playFanfare();
+  addShake(9);
+  saveGame();
+  openModal('contract-modal');
+}
+
+function contractToList() {
+  closeModals();
+  openModal('jobs-modal');
+}
+
+function contractNext() {
+  closeModals();
+  const next = state.contractIdx + 1;
+  if (PROJECTS[next]) startProjectStage(next, 0);
+  else openModal('jobs-modal');
 }
 
 function triggerDirtScan() {
@@ -2715,12 +2920,16 @@ function updateRepairHUD() {
 function onSurfaceDamage(chips, nozzle) {
   const st = state.stats;
   st.etchedCells += chips;
+  addShake(2.5);
+  spawnShards(state.mouse.x, state.mouse.y, Math.min(14, 4 + chips));
   if (st.incidents > 0 && state.stageTime - st.lastIncident < 1.2) return; // one charge per incident
   st.lastIncident = state.stageTime;
   st.incidents++;
   const cost = nozzle.impact >= 0.9 ? 15 : nozzle.impact >= 0.5 ? 10 : 5;
   st.repairPenalty += cost;
   sound.playDamage();
+  addShake(7);
+  try { if (navigator.vibrate) navigator.vibrate(35); } catch (e) {}
   showToast(`⚠ Surface damaged! −$${cost} repair — use the 40° White or foam near glass & trim`, true);
   updateRepairHUD();
 }
@@ -2894,6 +3103,8 @@ function loop(now) {
         const chips = fluidGrid.applySpray(state.mouse.x, state.mouse.y, nozzle.radius, nozzle.power, nozzle.isSoap,
           { impact: nozzle.impact || 0, rate: nozzle.rate || 1 });
         if (chips > 0) onSurfaceDamage(chips, nozzle);
+        const sf = fluidGrid.surfaceAt(state.mouse.x, state.mouse.y);
+        sound.setSurface(sf.mat, sf.clean, sf.foamy);
         spawnSprayParticles(state.mouse.x, state.mouse.y, nozzle);
       }
 
@@ -2907,6 +3118,14 @@ function loop(now) {
         updateTimerHUD();
       }
     }
+
+    // Screen shake: impacts decay quickly; a high-impact jet adds a faint constant rumble
+    state.shake *= Math.exp(-dt * 9);
+    if (state.shake < 0.05) state.shake = 0;
+    const rumble = (state.mouse.down && !modalOpen() && !REDUCED_MOTION) ? (NOZZLES[state.nozzleIdx].impact || 0) * 0.7 : 0;
+    const shk = REDUCED_MOTION ? 0 : state.shake + rumble;
+    ctx.save();
+    ctx.translate((Math.random() - 0.5) * 2 * shk, (Math.random() - 0.5) * 2 * shk);
 
     // Composite Layers: Clean Surface + Dirty Grime Mask + Wet Soap/Runoff
     ctx.drawImage(cleanCanvas, 0, 0);
@@ -2953,24 +3172,25 @@ function loop(now) {
       ctx.restore();
     }
 
-    // Update & render physics splash particles
+    // Update & render splash / splatter / bubble particles
     for (let i = state.particles.length - 1; i >= 0; i--) {
       const p = state.particles[i];
       p.x += p.vx;
       p.y += p.vy;
-      p.vy += 0.22; // Gravity
-      p.life -= dt * 2.5;
+      p.vy += (p.g !== undefined ? p.g : 0.22); // gravity (bubbles use a small negative value)
+      p.life -= dt * (p.decay || 2.5);
       if (p.life <= 0) {
         state.particles.splice(i, 1);
         continue;
       }
-      ctx.globalAlpha = p.life;
+      ctx.globalAlpha = Math.min(1, p.life * 1.4);
       ctx.fillStyle = p.color;
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+    ctx.restore(); // end of screen-shake region; the reticle stays exactly under the cursor
 
     // Custom Nozzle Reticle
     const nozzle = NOZZLES[state.nozzleIdx];
