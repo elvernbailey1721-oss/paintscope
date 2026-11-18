@@ -296,6 +296,11 @@
   .stage-pills { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
   .pill { font-size: 11px; background: #0f172a; border: 1px solid #334155; padding: 4px 10px; border-radius: 6px; color: #cbd5e1; font-weight: 600; }
   .modal-footer { display: flex; justify-content: flex-end; gap: 12px; }
+  .card.locked { opacity: 0.55; border-style: dashed; }
+  .card.locked .pill, .card.locked button { cursor: not-allowed; }
+  .lock-note { font-size: 12px; color: #fbbf24; margin-top: 6px; font-weight: 600; }
+  .career-banner { margin: 0 0 14px; padding: 10px 14px; border-radius: 10px; background: linear-gradient(90deg, rgba(240,171,252,0.18), rgba(56,189,248,0.18)); border: 1px solid rgba(240,171,252,0.45); color: #f5d0fe; font-weight: 700; font-size: 14px; }
+  .career-banner small { display: block; color: #cbd5e1; font-weight: 500; font-size: 12px; margin-top: 3px; }
 
   /* Toast notification */
   #toast {
@@ -467,6 +472,7 @@
     <p class="sub" id="ct-sub" style="margin-bottom:10px;"></p>
     <div class="grade" id="ct-grade">A</div>
     <div class="ct-quote" id="ct-quote"></div>
+    <div class="career-banner" id="ct-career" style="display:none"></div>
     <div id="ct-rows" class="res-rows"></div>
     <div class="res-total"><span>Contract earnings</span><strong id="ct-total">$0</strong></div>
     <div class="modal-footer" style="justify-content:center;margin-top:22px;">
@@ -2812,7 +2818,8 @@ function showContractComplete(proj) {
     return `<div class="res-row"><span>${st.name.replace(/^Stage \d+:\s*/, '')}<small>${fmtTime(l.time)}</small></span><span>${starText(st.stars || 0)} &nbsp; $${l.total}</span></div>`;
   });
   const ratio = starsGot / (3 * n);
-  const grade = ratio >= 1 ? 'S' : ratio >= 0.84 ? 'A' : ratio >= 0.67 ? 'B' : 'C';
+  const EPS = 1e-9; // 5/6 and 2/3 star ratios must land on A and B, not one grade lower
+  const grade = ratio >= 1 ? 'S' : ratio >= 5 / 6 - EPS ? 'A' : ratio >= 2 / 3 - EPS ? 'B' : 'C';
 
   // One-time completion bonus (and a perfect-contract bonus for straight 3-star work)
   let bonusRows = '', bonus = 0;
@@ -2837,7 +2844,16 @@ function showContractComplete(proj) {
   document.getElementById('ct-rows').innerHTML = rows.join('') + bonusRows;
   document.getElementById('ct-total').textContent = `$${earned + bonus}`;
   const hasNextContract = state.contractIdx + 1 < PROJECTS.length;
-  document.getElementById('ct-next').style.display = hasNextContract ? '' : 'none';
+  const nextBtn = document.getElementById('ct-next');
+  nextBtn.style.display = hasNextContract ? '' : 'none';
+  if (hasNextContract) nextBtn.textContent = `Unlocked: ${PROJECTS[state.contractIdx + 1].name} ▶`;
+  const career = document.getElementById('ct-career');
+  if (PROJECTS.every(contractDone)) {
+    const cs = careerStars();
+    const title = cs.got === cs.max ? 'Master Detailer' : cs.got >= cs.max * 0.8 ? 'Senior Crew Chief' : 'Licensed Contractor';
+    career.innerHTML = `🎖 Every contract complete: you are now a <strong>${title}</strong><small>${cs.got} / ${cs.max} ★ across all stages${cs.got < cs.max ? ' · replay stages for a perfect career' : ''}</small>`;
+    career.style.display = '';
+  } else career.style.display = 'none';
 
   const cf = document.getElementById('confetti');
   const colors = ['#f87171', '#fbbf24', '#34d399', '#38bdf8', '#e879f9', '#fb923c'];
@@ -2976,29 +2992,50 @@ function closeModals() {
   document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('open'));
 }
 
+// Contracts unlock in order: finish one to open the next. A contract the player
+// has already worked on (older saves had everything open) stays unlocked.
+function contractUnlocked(pIdx) {
+  const p = PROJECTS[pIdx];
+  if (!p) return false;
+  return pIdx === 0 || contractDone(PROJECTS[pIdx - 1]) ||
+    p.stages.some(st => st.completed) || pIdx === state.projectIdx;
+}
+
+function careerStars() {
+  let got = 0, max = 0;
+  PROJECTS.forEach(p => p.stages.forEach(st => { got += st.stars || 0; max += 3; }));
+  return { got, max };
+}
+
 function renderJobsModal() {
   const list = document.getElementById('jobs-list');
-  list.innerHTML = PROJECTS.map((p, pIdx) => `
-    <div class="card" style="flex-direction:column;align-items:stretch;">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
+  list.innerHTML = PROJECTS.map((p, pIdx) => {
+    const open = contractUnlocked(pIdx);
+    const dis = open ? '' : 'disabled';
+    const done = contractDone(p);
+    return `
+    <div class="card${open ? '' : ' locked'}" style="flex-direction:column;align-items:stretch;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
         <div class="card-info">
-          <h3>${p.name}</h3>
+          <h3>${open ? '' : '🔒 '}${p.name}${done ? ' ✅' : ''}</h3>
           <p>Client: ${p.client} • Difficulty: <strong style="color:#fbbf24">${p.difficulty || 'Standard'}</strong> • Total Contract Value: <strong style="color:#34d399">$${p.totalReward}</strong></p>
+          ${open ? '' : `<div class="lock-note">Finish every stage of “${PROJECTS[pIdx - 1].name}” to unlock this contract.</div>`}
         </div>
-        <button class="primary" onclick="startProjectStage(${pIdx}, 0)">Start Contract</button>
+        <button class="primary" ${dis} onclick="startProjectStage(${pIdx}, 0)">${open ? (done ? 'Replay' : 'Start Contract') : 'Locked'}</button>
       </div>
       <div class="stage-pills">
         ${p.stages.map((st, sIdx) => `
-          <button class="pill" onclick="startProjectStage(${pIdx}, ${sIdx})">
-            ${st.completed ? starText(st.stars || 1) : '▶'} ${st.name.replace(/^Stage \d+:\s*/, '')} ($${st.reward})
+          <button class="pill" ${dis} onclick="startProjectStage(${pIdx}, ${sIdx})">
+            ${st.completed ? starText(st.stars || 1) : (open ? '▶' : '🔒')} ${st.name.replace(/^Stage \d+:\s*/, '')} ($${st.reward})
           </button>
         `).join('')}
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 function startProjectStage(pIdx, sIdx) {
+  if (!contractUnlocked(pIdx)) { showToast('🔒 Finish the previous contract first', true); return; }
   closeModals();
   loadStage(pIdx, sIdx);
   saveGame();
