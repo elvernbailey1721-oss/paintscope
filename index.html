@@ -46,6 +46,7 @@
   }
   .panel button, #weather-hud button { pointer-events: auto; white-space: nowrap; }
   @media (max-width: 1400px) {
+    #stage-hud, #weather-hud { top: 136px; }
     .progress-wrap { width: 120px; }
     .panel { gap: 10px; padding: 8px 12px; }
     .panel button { padding: 6px 10px; }
@@ -215,6 +216,13 @@
     font-size: 14px;
   }
 
+  @media (max-width: 1250px) {
+    /* laptop widths: the two top panels no longer fit side by side, so stack them */
+    #hud-top { flex-direction: column; align-items: stretch; gap: 6px; }
+    #hud-top .panel { flex-wrap: wrap; justify-content: space-between; }
+    #stage-hud, #weather-hud { top: 168px; }
+  }
+
   @media (max-width: 900px) {
     #hud-top { top: 8px; left: 8px; right: 8px; flex-direction: column; align-items: stretch; gap: 6px; }
     .panel { padding: 8px 10px; gap: 8px; flex-wrap: wrap; justify-content: space-between; }
@@ -339,7 +347,7 @@
 
   #hint {
     position: fixed;
-    bottom: 118px;
+    bottom: 136px;
     left: 50%;
     transform: translateX(-50%);
     width: max-content;
@@ -1631,7 +1639,7 @@ class FluidGrimeGrid {
         // Soap foam, then runoff (blue water -> brown mud) composited over it
         let pr = 0, pg = 0, pb = 0, pa = 0;
         const foam = this.foam[i];
-        if (foam > 0.1) { pr = 224; pg = 242; pb = 254; pa = Math.min(1, foam); }
+        if (foam > 0.1) { pr = 224; pg = 242; pb = 254; pa = Math.min(0.5, foam * 0.55); } // translucent so the dirt underneath stays visible
 
         const wDepth = this.water[i], sed = this.sediment[i];
         if (wDepth > 0.1 || sed > 0.03) {
