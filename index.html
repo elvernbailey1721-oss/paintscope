@@ -104,6 +104,8 @@
     pointer-events: none;
   }
   #stage-hud.hidden { opacity: 0; pointer-events: none; }
+  /* While spraying under a HUD panel it fades so the dirt beneath stays visible */
+  .peek { opacity: 0.14 !important; transition: opacity 0.15s ease-out !important; }
   #stage-hud h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: #94a3b8; margin-bottom: 8px; font-weight: 800; }
   .stage-item {
     display: flex;
@@ -438,7 +440,6 @@
   <div class="weather-row"><span>Humidity:</span><span class="weather-val" id="wh-humidity">25%</span></div>
   <div class="weather-row"><span>Rain Rate:</span><span class="weather-val" id="wh-rain">0.0 in/hr</span></div>
   <div class="weather-row"><span>Air Temp:</span><span class="weather-val" id="wh-temp">30°C</span></div>
-  <div class="weather-row"><span>Sim Particles:</span><span class="weather-val" id="wh-particles">0</span></div>
   <button id="weather-btn" onclick="nextWeather()" style="margin-top:8px;width:100%;" title="Cycle weather manually (shortcut: W)">🌦 Next Weather (W)</button>
 </div>
 
@@ -2680,7 +2681,6 @@ function updateWeather(dt) {
     document.getElementById('wh-humidity').textContent = `${Math.round(cur.humidity * 100)}%`;
     document.getElementById('wh-rain').textContent = (cur.rainRate * 3.5).toFixed(1) + ' in/hr';
     document.getElementById('wh-temp').textContent = `${Math.round(cur.temp)}°C`;
-    document.getElementById('wh-particles').textContent = state.particles.length;
     sound.setWeather(cur.rainRate, cur.windX); // rain / wind drive the ambience
   }
 }
@@ -3292,6 +3292,25 @@ function toCanvasXY(e) {
   const ox = (r.width - VW * k) / 2, oy = (r.height - VH * k) / 2;
   state.mouse.x = (e.clientX - r.left - ox) / k;
   state.mouse.y = (e.clientY - r.top - oy) / k;
+  state.mouse.cx = e.clientX; state.mouse.cy = e.clientY; state.mouse.k = k; // window coords, for HUD peeking
+}
+
+// Fade any HUD panel the reticle overlaps while spraying. Panels stay solid otherwise,
+// so their buttons are always readable and clickable when the player isn't spraying.
+let peekEls = null;
+function updatePanelPeek(spraying) {
+  if (!peekEls) peekEls = [...document.querySelectorAll('#hud-top .panel, #stage-hud, #weather-hud, #hud-bottom')];
+  const m = state.mouse;
+  const r = spraying && m.cx !== undefined ? NOZZLES[state.nozzleIdx].radius * (1 + (UPGRADES[1].level - 1) * 0.20) * (m.k || 1) : -1;
+  for (const el of peekEls) {
+    let over = false;
+    if (r >= 0) {
+      const b = el.getBoundingClientRect();
+      const nx = Math.max(b.left, Math.min(m.cx, b.right)), ny = Math.max(b.top, Math.min(m.cy, b.bottom));
+      over = Math.hypot(m.cx - nx, m.cy - ny) < r; // reticle circle touches the panel
+    }
+    if (el.classList.contains('peek') !== over) el.classList.toggle('peek', over);
+  }
 }
 window.addEventListener('resize', resize);
 window.addEventListener('resize', () => placeHint());
@@ -3320,8 +3339,8 @@ window.addEventListener('wheel', e => {
 });
 window.addEventListener('keydown', e => {
   if (e.key >= '1' && e.key <= '5' && !modalOpen()) selectNozzle(parseInt(e.key) - 1);
-  if (e.key === 'Tab' || e.key.toLowerCase() === 'h') {
-    e.preventDefault();
+  if ((e.key === 'Tab' || e.key.toLowerCase() === 'h') && state.mode === 'play' && !modalOpen()) {
+    e.preventDefault(); // outside play (menus, modals) Tab moves focus as usual
     triggerDirtScan();
   }
   if (e.key.toLowerCase() === 'w' && state.mode === 'play' && !modalOpen()) nextWeather();
@@ -3450,6 +3469,8 @@ function loop(now) {
     }
     ctx.globalAlpha = 1;
     ctx.restore(); // end of screen-shake region; the reticle stays exactly under the cursor
+
+    updatePanelPeek(state.mouse.down && !modalOpen());
 
     // Custom Nozzle Reticle
     const nozzle = NOZZLES[state.nozzleIdx];
