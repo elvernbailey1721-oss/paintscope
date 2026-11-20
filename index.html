@@ -327,6 +327,7 @@
   }
   #toast.show { opacity: 1; }
   #toast.tip { background: rgba(15, 23, 42, 0.94); border-color: #fbbf24; color: #fef3c7; font-weight: 700; font-size: 14px; max-width: min(560px, calc(100vw - 32px)); width: max-content; text-align: center; line-height: 1.35; }
+  @media (max-width: 900px) { #toast.tip { font-size: 12.5px; padding: 8px 14px; } } /* compact on phones */
   .nozzle-btn.suggest { animation: nozzleSuggest 1s ease-in-out 5; border-color: #fbbf24; }
   @keyframes nozzleSuggest { 50% { box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.55), 0 0 18px rgba(251, 191, 36, 0.5); } }
   #toast.warn { background: #7f1d1d; border-color: #f87171; color: #fee2e2; box-shadow: 0 10px 30px rgba(127, 29, 29, 0.6); }
@@ -1530,7 +1531,7 @@ class FluidGrimeGrid {
     this.splat = { n: 0, r: 0, g: 0, b: 0 }; // dirt stripped this call, colour-weighted, for splatter particles
     // Stall stats for the coach hint: dirty cells under the spray, how many this nozzle can't cut,
     // the cut threshold they need, whether they're foamed, and the most fragile surface among them
-    const st = this.stall = { dirty: 0, stalled: 0, thrSum: 0, foamed: 0, minFrag: 9, fragile: 0 };
+    const st = this.stall = { cut: 0, dirty: 0, stalled: 0, thrSum: 0, foamed: 0, minFrag: 9, fragile: 0 };
 
     for (let gy = startY; gy <= endY; gy++) {
       for (let gx = startX; gx <= endX; gx++) {
@@ -1586,6 +1587,7 @@ class FluidGrimeGrid {
               const removeAmount = (effectivePSI - threshold) * falloff * 0.5 * rate;
               const detached = Math.min(this.grime[i], removeAmount);
               if (detached > 0.002) {
+                st.cut++; // this cell is visibly coming clean
                 const kd = this.stubborn[i];
                 const col = kd ? (kd === 2 ? GRAFFITI_PAL[this.tint[i] % GRAFFITI_PAL.length] : KIND_RGB[kd]) : [92, 70, 46];
                 this.splat.n += detached; this.splat.r += col[0] * detached; this.splat.g += col[1] * detached; this.splat.b += col[2] * detached;
@@ -2968,9 +2970,40 @@ function showToast(msg, warn = false, ms = 3000) {
   el.textContent = msg;
   el.classList.toggle('warn', warn === true);
   el.classList.toggle('tip', warn === 'tip');
+  placeToast();
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove('show'), ms);
+}
+
+// Hide the nozzle tip early (the player switched nozzle or is cutting again)
+function hideTip() {
+  const el = document.getElementById('toast');
+  if (!el.classList.contains('tip') || !el.classList.contains('show')) return;
+  clearTimeout(toastTimer);
+  el.classList.remove('show');
+}
+
+// Put the toast where it covers no HUD panel. On desktop and laptop that is its usual spot
+// just under the top bar; on phones the top HUD is taller (and wraps), so it drops below it
+// or, if the side panels are in the way, sits just above the nozzle dock.
+function placeToast() {
+  const el = document.getElementById('toast');
+  el.style.top = '';
+  const shown = e => e && !e.classList.contains('hidden') && getComputedStyle(e).display !== 'none' &&
+    (e.id !== 'hint' || e.classList.contains('show'));
+  const panels = ['hud-top', 'stage-hud', 'weather-hud', 'hud-bottom', 'hint']
+    .map(id => document.getElementById(id)).filter(shown).map(e => e.getBoundingClientRect());
+  const h = el.offsetHeight, w = el.offsetWidth;
+  const left = (window.innerWidth - w) / 2, right = left + w;
+  const hits = top => panels.some(r => r.left < right && left < r.right && r.top < top + h && top < r.bottom);
+  const hudTop = document.getElementById('hud-top'), dock = document.getElementById('hud-bottom');
+  const underTop = Math.max(86, shown(hudTop) ? hudTop.getBoundingClientRect().bottom + 8 : 0);
+  const aboveDock = (shown(dock) ? dock.getBoundingClientRect().top : window.innerHeight) - 8 - h;
+  const fits = t => t >= 0 && t + h <= window.innerHeight;
+  const spots = [underTop, aboveDock, ...panels.map(r => r.bottom + 8)].filter(fits);
+  const top = spots.find(t => !hits(t));
+  el.style.top = (top !== undefined ? top : underTop) + 'px';
 }
 
 // ================= NOZZLE-STALL COACH =================
@@ -3032,6 +3065,12 @@ function updateStallCoach(dt, spraying, nozzleIdx) {
   const nz = NOZZLES[nozzleIdx];
   const stuck = spraying && !nz.isSoap && st && st.dirty >= 6 && st.stalled / st.dirty >= 0.75;
   stallCoach.t = stuck ? stallCoach.t + dt : Math.max(0, stallCoach.t - dt * 2);
+  // Once the spray is cutting properly again for half a second, the tip has done its job
+  // Cutting again: a good share of the dirt under the reticle is visibly coming clean
+  // (a stubborn spot's soft rim also comes clean, so a few cut cells alone don't count)
+  const cutting = spraying && !nz.isSoap && st && st.cut >= 6 && st.cut / st.dirty >= 0.35 && st.stalled / st.dirty < 0.75;
+  stallCoach.goodT = cutting ? (stallCoach.goodT || 0) + dt : 0;
+  if (stallCoach.goodT > 0.5) hideTip();
   if (stallCoach.t < STALL_SECONDS || stallCoach.cooldown > 0 || state.stageFinished) return;
   stallCoach.t = 0;
   const a = stallAdvice(st, nozzleIdx);
@@ -3123,9 +3162,11 @@ function buildNozzleDock() {
 }
 
 function selectNozzle(idx) {
+  const prevNozzle = state.nozzleIdx;
   state.nozzleIdx = idx;
   if (idx === stallCoach.suggest) { stallCoach.suggest = -1; stallCoach.suggestTimer = 0; }
   stallCoach.t = 0;
+  if (idx !== prevNozzle) hideTip(); // the player acted on (or moved past) the tip
   buildNozzleDock();
   // Retune the live spray sound smoothly when swapping nozzles mid-spray
   if (state.mouse.down && state.mode === 'play') sound.setSpray(true, NOZZLES[idx]);
